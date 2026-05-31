@@ -108,11 +108,12 @@ class BotWorker(QThread):
     log_signal = Signal(str)
     finished_signal = Signal()
     
-    def __init__(self, mode, device_address, loop_count):
+    def __init__(self, mode, device_address, loop_count, discord_webhook_url=""):
         super().__init__()
         self.mode = mode
         self.device_address = device_address
         self.loop_count = loop_count
+        self.discord_webhook_url = discord_webhook_url
         self.bot = None
         
     def run(self):
@@ -128,7 +129,7 @@ class BotWorker(QThread):
         gbf_bot_prototype.print = custom_print
         
         try:
-            self.bot = GBFController(mode=self.mode)
+            self.bot = GBFController(mode=self.mode, discord_webhook_url=self.discord_webhook_url)
             # Khởi chạy luồng tuần tự
             custom_print(f"[BOT] Bắt đầu khởi tạo ADB tới: {self.device_address or 'Mặc định'}")
             
@@ -223,6 +224,21 @@ class GBFAutomationGUI(QMainWindow):
         self.btn_check_adb.clicked.connect(self.check_adb_connection)
         left_layout.addWidget(self.btn_check_adb)
         
+        # Cấu hình Discord Webhook
+        left_layout.addWidget(QLabel("Discord Webhook (Thông báo Captcha):"))
+        webhook_row = QHBoxLayout()
+        self.txt_webhook = QLineEdit()
+        self.txt_webhook.setPlaceholderText("Nhập URL Discord Webhook (tùy chọn)")
+        self.btn_save_webhook = QPushButton("Lưu")
+        self.btn_save_webhook.setFixedWidth(70)
+        self.btn_save_webhook.clicked.connect(self.save_webhook_config)
+        webhook_row.addWidget(self.txt_webhook)
+        webhook_row.addWidget(self.btn_save_webhook)
+        left_layout.addLayout(webhook_row)
+        
+        # Đọc cấu hình khi khởi tạo GUI
+        self.load_webhook_config()
+
         left_layout.addStretch()
         
         # Nút START / STOP
@@ -345,6 +361,31 @@ class GBFAutomationGUI(QMainWindow):
         self.lbl_loop_count.setVisible(is_limited)
         self.txt_loop_count.setVisible(is_limited)
 
+    def load_webhook_config(self):
+        """Đọc webhook từ file config.txt nếu có."""
+        config_file = "config.txt"
+        if os.path.exists(config_file):
+            try:
+                with open(config_file, "r", encoding="utf-8") as f:
+                    webhook = f.read().strip()
+                    if webhook:
+                        self.txt_webhook.setText(webhook)
+            except Exception as e:
+                self.add_log(f"[ERROR] Không thể đọc config.txt: {e}")
+
+    def save_webhook_config(self):
+        """Lưu webhook vào file config.txt."""
+        config_file = "config.txt"
+        webhook = self.txt_webhook.text().strip()
+        try:
+            with open(config_file, "w", encoding="utf-8") as f:
+                f.write(webhook)
+            self.add_log("[INFO] Đã lưu Webhook URL vào config.txt")
+            QMessageBox.information(self, "Lưu cấu hình", "Lưu Discord Webhook thành công!", QMessageBox.Ok)
+        except Exception as e:
+            self.add_log(f"[ERROR] Không thể lưu config.txt: {e}")
+            QMessageBox.warning(self, "Lỗi lưu cấu hình", f"Không thể lưu file: {e}", QMessageBox.Ok)
+
     def toggle_bot(self):
         """Bật/tắt trạng thái luồng chạy của Bot."""
         if self.worker and self.worker.isRunning():
@@ -383,14 +424,24 @@ class GBFAutomationGUI(QMainWindow):
             self.cb_loop_type.setEnabled(False)
             self.txt_loop_count.setEnabled(False)
             self.btn_check_adb.setEnabled(False)
+            self.txt_webhook.setEnabled(False)
+            self.btn_save_webhook.setEnabled(False)
             
             # Cấu hình nút STOP
             self.btn_control.setText("DỪNG BOT")
             self.btn_control.setObjectName("stopBtn")
             self.btn_control.setStyleSheet(f"background-color: {COLORS['accent_red']};")
             
+            webhook_url = self.txt_webhook.text().strip()
+            if webhook_url: # Auto save when starting bot
+                try:
+                    with open("config.txt", "w", encoding="utf-8") as f:
+                        f.write(webhook_url)
+                except:
+                    pass
+
             # Tạo luồng worker chạy ngầm
-            self.worker = BotWorker(mode=mode, device_address=device_address, loop_count=loop_count)
+            self.worker = BotWorker(mode=mode, device_address=device_address, loop_count=loop_count, discord_webhook_url=webhook_url)
             self.worker.log_signal.connect(self.add_log)
             self.worker.finished_signal.connect(self.on_bot_stopped)
             self.worker.start()
@@ -403,6 +454,8 @@ class GBFAutomationGUI(QMainWindow):
         self.cb_loop_type.setEnabled(True)
         self.txt_loop_count.setEnabled(self.cb_loop_type.currentIndex() == 1)
         self.btn_check_adb.setEnabled(True)
+        self.txt_webhook.setEnabled(True)
+        self.btn_save_webhook.setEnabled(True)
         
         self.btn_control.setText("BẮT ĐẦU BOT")
         self.btn_control.setObjectName("startBtn")

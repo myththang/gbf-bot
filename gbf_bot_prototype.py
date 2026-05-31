@@ -5,6 +5,8 @@ import cv2
 import numpy as np
 import pytesseract
 from PIL import Image
+import urllib.request
+import json
 
 # ==================== CẤU HÌNH TESSERACT ====================
 # Thiết lập đường dẫn tới Tesseract executable (tương tự UMAT)
@@ -272,14 +274,43 @@ def find_template(screen_pil, template_path, confidence=0.8, region=None):
 
 # ==================== LUỒNG ĐIỀU KHIỂN CHÍNH (GBF BASIC LOOP) ====================
 class GBFController:
-    def __init__(self, mode="full_auto"):
+    def __init__(self, mode="full_auto", discord_webhook_url=""):
         self.mode = mode  # "auto" (spam attack) hoặc "full_auto" (click full auto + reload)
+        self.discord_webhook_url = discord_webhook_url
         self.is_running = True
         self.rocket_coords    = None  # Cache tọa độ nút rocket    — scan 1 lần dùng mãi
         self.full_auto_coords = None  # Cache tọa độ nút Full Auto — scan 1 lần dùng mãi
         self.reload_coords    = None  # Cache tọa độ nút Reload    — scan 1 lần dùng mãi
         self.ok_coords        = None  # Cache tọa độ nút OK        — scan 1 lần dùng mãi
+
+    def send_discord_webhook(self, message):
+        """Gửi thông báo tới Discord Webhook."""
+        if not self.discord_webhook_url:
+            return
         
+        data = {"content": message}
+        req = urllib.request.Request(
+            self.discord_webhook_url, 
+            data=json.dumps(data).encode('utf-8'), 
+            headers={'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0'}
+        )
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            print("[DISCORD] Đã gửi thông báo thành công!")
+        except Exception as e:
+            print(f"[DISCORD ERROR] Lỗi khi gửi webhook: {e}")
+
+    def check_captcha(self, screen):
+        """Kiểm tra màn hình xem có Captcha 'Access Verification' không."""
+        w, h = screen.size
+        # Quét khu vực giữa màn hình
+        region = (0, int(h * 0.2), w, int(h * 0.8))
+        text = get_text_from_region(screen, region, threshold_val=150)
+        
+        if "Access Verification" in text or ("Access" in text and "Verification" in text):
+            return True
+        return False
+
     def detect_start_screen(self):
         """Kiểm tra xem đang ở màn hình Chọn Summon hay màn hình Chọn Party."""
         print("[PROCESS] Đang nhận diện màn hình khởi đầu...")
@@ -333,7 +364,7 @@ class GBFController:
             print("[WARNING] Không tìm thấy nút OK bằng ảnh mẫu, nhấp tọa độ mặc định.")
             tap(w // 2, int(h * 0.60))
             
-        time.sleep(5.0) # Đợi tải vào trận đấu
+        time.sleep(1.0) # Đợi tải vào trận đấu (chuyển sang wait_for_combat_start để xử lý Captcha)
 
     def cache_rocket_coords(self):
         """
@@ -360,6 +391,15 @@ class GBFController:
         POLL_INTERVAL = 0.5
         while self.is_running:
             screen = take_screenshot()
+            
+            # Quét Captcha mỗi 3 lần lặp (khoảng 1.5s)
+            if attempt % 3 == 0:
+                if self.check_captcha(screen):
+                    print("[ALERT] PHÁT HIỆN CAPTCHA 'Access Verification'!")
+                    self.send_discord_webhook("@everyone Phát hiện Captcha 'Access Verification'! Bot đã tự động dừng.")
+                    self.is_running = False
+                    return None, None
+
             attack_btn = find_template(screen, "assets/buttons/attack.webp", confidence=0.85)
             if attack_btn:
                 print(f"[SUCCESS] Đã phát hiện nút Attack sau {attempt * POLL_INTERVAL:.1f} giây!")
@@ -405,29 +445,30 @@ class GBFController:
 
             # --- Bước B: Nhấn nút Attack 1 lần ---
             tap(attack_coords[0], attack_coords[1])
+            time.sleep(0.5)
             print("[ACTION] Đã nhấn Attack. Đang chờ nút Attack biến mất để reload...")
 
             # --- Bước C: Chờ attack biến mất → reload ngay, không chờ cứng ---
-            attack_gone = False
-            for _ in range(60):  # Timeout tối đa 30 giây
-                if not self.is_running:
-                    return
-                screen_check = take_screenshot()
-                attack_still_here = find_template(screen_check, "assets/buttons/attack.webp", confidence=0.85)
-                if not attack_still_here:
-                    print("[ACTION] Nút Attack đã biến mất! Reload ngay lập tức...")
-                    attack_gone = True
-                    # Nếu chưa có cache reload, scan từ screen này luôn
-                    if not self.reload_coords:
-                        rl = find_template(screen_check, "assets/buttons/reload.webp", confidence=0.85)
-                        if rl:
-                            self.reload_coords = rl
-                            print(f"[CACHE] Cache Reload coords (sau attack mất): {self.reload_coords}")
-                    break
-                time.sleep(0.5)
+            # attack_gone = False
+            # for _ in range(60):  # Timeout tối đa 30 giây
+            #     if not self.is_running:
+            #         return
+            #     screen_check = take_screenshot()
+            #     attack_still_here = find_template(screen_check, "assets/buttons/attack.webp", confidence=0.85)
+            #     if not attack_still_here:
+            #         print("[ACTION] Nút Attack đã biến mất! Reload ngay lập tức...")
+            #         attack_gone = True
+            #         # Nếu chưa có cache reload, scan từ screen này luôn
+            #         if not self.reload_coords:
+            #             rl = find_template(screen_check, "assets/buttons/reload.webp", confidence=0.85)
+            #             if rl:
+            #                 self.reload_coords = rl
+            #                 print(f"[CACHE] Cache Reload coords (sau attack mất): {self.reload_coords}")
+            #         break
+            #     time.sleep(0.5)
 
-            if not attack_gone:
-                print("[WARNING] Timeout chờ attack biến mất. Tiến hành reload anyway...")
+            # if not attack_gone:
+            #     print("[WARNING] Timeout chờ attack biến mất. Tiến hành reload anyway...")
 
             # --- Bước D: Reload bằng tọa độ cache, không cần scan ---
             if self.reload_coords:
@@ -701,6 +742,37 @@ class GBFController:
 
 # ==================== ĐIỂM CHẠY THỬ ====================
 if __name__ == "__main__":
+    # Đọc cấu hình webhook đã lưu
+    config_file = "config.txt"
+    saved_webhook = ""
+    if os.path.exists(config_file):
+        try:
+            with open(config_file, "r", encoding="utf-8") as f:
+                saved_webhook = f.read().strip()
+        except Exception:
+            pass
+
+    # Nhập webhook url
+    prompt_text = "Nhập Discord Webhook URL"
+    if saved_webhook:
+        prompt_text += f" (Nhấn Enter để dùng webhook đã lưu: {saved_webhook[:30]}...)"
+    else:
+        prompt_text += " (để trống nếu không dùng)"
+    
+    user_input = input(prompt_text + ": ").strip()
+    
+    if user_input:
+        webhook_url = user_input
+        # Lưu lại vào file config
+        try:
+            with open(config_file, "w", encoding="utf-8") as f:
+                f.write(webhook_url)
+            print("[INFO] Đã lưu Webhook URL mới vào config.txt")
+        except Exception as e:
+            print(f"[ERROR] Không thể lưu config.txt: {e}")
+    else:
+        webhook_url = saved_webhook
+
     # Tự động scan và kết nối thiết bị ADB đang hoạt động
     if not auto_detect_device():
         print("[BOT] Không tìm được thiết bị. Vui lòng kiểm tra kết nối ADB rồi chạy lại.")
@@ -708,5 +780,5 @@ if __name__ == "__main__":
 
     # Khởi chạy thử nghiệm bot với chế độ Full Auto + Reload
     # Mặc định chạy 1 vòng lặp để thử nghiệm, bạn có thể truyền số vòng lặp khác, vd: loop_count=5 hoặc loop_count=-1 (vô hạn)
-    bot = GBFController(mode="full_auto")
+    bot = GBFController(mode="full_auto", discord_webhook_url=webhook_url)
     bot.start_loop(loop_count=1)
