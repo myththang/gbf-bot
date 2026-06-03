@@ -216,18 +216,28 @@ def preprocess_for_ocr(pil_img, threshold_val=180):
     _, thresh = cv2.threshold(gray, threshold_val, 255, cv2.THRESH_BINARY)
     return thresh
 
-def get_text_from_region(pil_img, region=None, threshold_val=180):
+def get_text_from_region(pil_img, region=None, threshold_val=180, scale_factor=1):
     """
     Trích xuất chữ từ vùng chỉ định trên ảnh chụp màn hình sử dụng Tesseract.
     
     Args:
         pil_img: PIL Image
         region: Tuple (left, top, right, bottom). Nếu None, sẽ OCR toàn bộ ảnh.
+        threshold_val: Giá trị ngưỡng nhị phân hóa.
+        scale_factor: Hệ số phóng to ảnh (mặc định = 1, không phóng to).
     """
     if region:
         cropped = pil_img.crop(region)
     else:
         cropped = pil_img
+        
+    if scale_factor > 1:
+        w, h = cropped.size
+        try:
+            resample_filter = Image.Resampling.LANCZOS
+        except AttributeError:
+            resample_filter = Image.LANCZOS
+        cropped = cropped.resize((int(w * scale_factor), int(h * scale_factor)), resample_filter)
         
     # Áp dụng tiền xử lý
     processed_np = preprocess_for_ocr(cropped, threshold_val)
@@ -244,17 +254,26 @@ def get_text_from_region(pil_img, region=None, threshold_val=180):
         print(f"[OCR ERROR] Không thể nhận diện văn bản: {e}")
         return ""
 
+# Cache ảnh template trong RAM để tránh đọc disk mỗi lần gọi find_template
+_template_cache = {}
+
 def find_template(screen_pil, template_path, confidence=0.8, region=None):
     """ Tìm kiếm template hình ảnh trên màn hình bằng OpenCV (hỗ trợ giới hạn vùng quét)."""
+    global _template_cache
     if region:
         # region: (left, top, right, bottom)
         screen_pil = screen_pil.crop(region)
         
     screen_np = cv2.cvtColor(np.array(screen_pil), cv2.COLOR_RGB2BGR)
-    template = cv2.imread(template_path)
-    if template is None:
-        print(f"[ERROR] Không tìm thấy file template tại: {template_path}")
-        return None
+
+    # Dùng cache để tránh đọc file từ disk mỗi lần (tiết kiệm ~10-50ms/call)
+    if template_path not in _template_cache:
+        template = cv2.imread(template_path)
+        if template is None:
+            print(f"[ERROR] Không tìm thấy file template tại: {template_path}")
+            return None
+        _template_cache[template_path] = template
+    template = _template_cache[template_path]
         
     h, w = template.shape[:2]
     res = cv2.matchTemplate(screen_np, template, cv2.TM_CCOEFF_NORMED)
@@ -300,15 +319,87 @@ class GBFController:
         except Exception as e:
             print(f"[DISCORD ERROR] Lỗi khi gửi webhook: {e}")
 
+    def is_captcha_text(self, text):
+        """Kiểm tra xem chuỗi text có chứa các dấu hiệu của Captcha không (sử dụng Fuzzy Matching & Levenshtein)."""
+        if not text:
+            return False
+            
+        import re
+        import unicodedata
+        
+        # Chuẩn hóa Unicode (phát hiện và chuyển đổi các ký tự đặc biệt/ligature như ﬁ -> fi)
+        text_lower = text.lower()
+        text_normalized = unicodedata.normalize('NFKD', text_lower)
+        
+        # 1. Khớp chính xác cụm từ hoặc kiểm tra các từ khóa bảo mật khác
+        if "access verification" in text_normalized:
+            return True
+            
+        # 2. Kiểm tra sự xuất hiện đồng thời của các biến thể Access và Verification
+        access_patterns = ["access", "acess", "acces", "accs", "aqcess"]
+        verification_patterns = ["verification", "verif", "verify", "ver1fication", "venification", "verfication"]
+        
+        has_access = any(p in text_normalized for p in access_patterns)
+        has_verification = any(p in text_normalized for p in verification_patterns)
+        if has_access and has_verification:
+            return True
+            
+        # 3. Sử dụng thuật toán Levenshtein Distance kiểm tra từng từ đơn lẻ
+        words = re.findall(r'[a-z0-9]+', text_normalized)
+        
+        def levenshtein_distance(s1, s2):
+            if len(s1) < len(s2):
+                return levenshtein_distance(s2, s1)
+            if len(s2) == 0:
+                return len(s1)
+            previous_row = range(len(s2) + 1)
+            for i, c1 in enumerate(s1):
+                current_row = [i + 1]
+                for j, c2 in enumerate(s2):
+                    insertions = previous_row[j + 1] + 1
+                    deletions = current_row[j] + 1
+                    substitutions = previous_row[j] + (c1 != c2)
+                    current_row.append(min(insertions, deletions, substitutions))
+                previous_row = current_row
+            return previous_row[-1]
+
+        found_access_fuzzy = False
+        found_verification_fuzzy = False
+        
+        for w in words:
+            if len(w) >= 4:
+                # Từ gần giống "access" (khoảng cách <= 2)
+                if levenshtein_distance(w, "access") <= 2:
+                    found_access_fuzzy = True
+                # Từ gần giống "verification" (khoảng cách <= 3)
+                if levenshtein_distance(w, "verification") <= 3:
+                    found_verification_fuzzy = True
+                # Từ gần giống "verify" (khoảng cách <= 1)
+                if levenshtein_distance(w, "verify") <= 1:
+                    found_verification_fuzzy = True
+                    
+        if found_access_fuzzy and found_verification_fuzzy:
+            return True
+            
+        return False
+
     def check_captcha(self, screen):
         """Kiểm tra màn hình xem có Captcha 'Access Verification' không."""
         w, h = screen.size
-        # Quét khu vực giữa màn hình
+        # Quét khu vực giữa màn hình nơi popup Captcha thường xuất hiện
         region = (0, int(h * 0.2), w, int(h * 0.8))
-        text = get_text_from_region(screen, region, threshold_val=150)
-        
-        if "Access Verification" in text or ("Access" in text and "Verification" in text):
+
+        # scale_factor=1: captcha text đủ lớn để OCR không cần phóng to
+        # → tiết kiệm ~800-1500ms so với scale_factor=2
+        text = get_text_from_region(screen, region, threshold_val=150, scale_factor=1)
+        if self.is_captcha_text(text):
             return True
+
+        # Fallback threshold khác (không phóng to để tránh lag)
+        text_fallback = get_text_from_region(screen, region, threshold_val=200, scale_factor=1)
+        if self.is_captcha_text(text_fallback):
+            return True
+
         return False
 
     def detect_start_screen(self):
@@ -388,12 +479,13 @@ class GBFController:
         """Đợi cho đến khi vào trận đấu (Quét liên tục cho đến khi phát hiện nút Attack)."""
         print("[PROCESS] Đang đợi tải vào trận đấu...")
         attempt = 0
-        POLL_INTERVAL = 0.5
+        start_time = time.time()  # Đo thời gian thực thay vì estimate
         while self.is_running:
             screen = take_screenshot()
-            
-            # Quét Captcha mỗi 3 lần lặp (khoảng 1.5s)
-            if attempt % 3 == 0:
+
+            # Quét Captcha mỗi 10 lần lặp (thay vì 3) để giảm lag OCR
+            # Bỏ qua lần đầu (attempt=0) vì game chưa load, captcha chưa thể xuất hiện
+            if attempt > 0 and attempt % 10 == 0:
                 if self.check_captcha(screen):
                     print("[ALERT] PHÁT HIỆN CAPTCHA 'Access Verification'!")
                     self.send_discord_webhook("@everyone Phát hiện Captcha 'Access Verification'! Bot đã tự động dừng.")
@@ -402,15 +494,17 @@ class GBFController:
 
             attack_btn = find_template(screen, "assets/buttons/attack.webp", confidence=0.85)
             if attack_btn:
-                print(f"[SUCCESS] Đã phát hiện nút Attack sau {attempt * POLL_INTERVAL:.1f} giây!")
+                elapsed = time.time() - start_time
+                print(f"[SUCCESS] Đã phát hiện nút Attack sau {elapsed:.1f} giây!")
                 # Trả về cả screen để play_combat dùng lại, tránh chụp thêm
                 return attack_btn, screen
-            
+
             attempt += 1
             if attempt % 10 == 0:
-                print(f"[INFO] Vẫn đang đợi tải vào trận đấu (đã quét {attempt} lần, ~{attempt * POLL_INTERVAL:.1f}s)...")
-            time.sleep(POLL_INTERVAL)
-            
+                elapsed = time.time() - start_time
+                print(f"[INFO] Vẫn đang đợi tải vào trận đấu (đã quét {attempt} lần, {elapsed:.1f}s thực tế)...")
+            time.sleep(0.5)
+
         return None, None
 
     def play_combat(self, attack_coords, combat_screen=None):
@@ -421,169 +515,172 @@ class GBFController:
             combat_screen: Ảnh chụp màn hình đã có sẵn từ wait_for_combat_start,
                            dùng lại để tránh chụp thêm (tiết kiệm ~1-2 giây delay).
         """
-        if not self.is_running or not attack_coords:
+        if not self.is_running:
             return
-        # Dùng lại screen đã có, hoặc chụp mới nếu không có
+
+        print("[PROCESS] Bắt đầu vòng lặp combat...")
         screen = combat_screen if combat_screen is not None else take_screenshot()
         w, h = screen.size
+        
+        combat_turn = 0
+        max_turns = 50  # Giới hạn an toàn tránh lặp vô hạn
 
-        if self.mode == "auto":
-            # CHẾ ĐỘ AUTO (Nhấn Attack 1 lần, chờ biến mất rồi reload — giống Full Auto)
-            print("[MODE] Đang chạy chế độ AUTO (Nhấn Attack → chờ biến mất → reload)...")
+        while self.is_running and combat_turn < max_turns:
+            combat_turn += 1
+            print(f"[COMBAT] Bắt đầu lượt xử lý combat thứ {combat_turn}...")
 
-            # --- Bước A: Cache tọa độ reload nếu chưa có ---
-            if not self.reload_coords:
-                print("[CACHE] Lần đầu chạy AUTO — scan vị trí Reload để cache...")
-                rl = find_template(screen, "assets/buttons/reload.webp", confidence=0.85)
-                if rl:
-                    self.reload_coords = rl
-                    print(f"[CACHE] Đã cache Reload coords: {self.reload_coords}")
+            # --- Bước A: Thực hiện hành động tấn công tương ứng với chế độ ---
+            if self.mode == "auto":
+                # Chế độ Auto Spam Attack
+                print("[MODE] Đang chạy chế độ AUTO (Nhấn Attack → reload)...")
+
+                # Lần đầu tiên sử dụng attack_coords truyền vào, các lượt sau tự scan tìm nút Attack
+                current_attack_coords = attack_coords if combat_turn == 1 else find_template(screen, "assets/buttons/attack.webp", confidence=0.85)
+
+                if current_attack_coords:
+                    # Cache reload nếu chưa có
+                    if not self.reload_coords:
+                        print("[CACHE] Quét vị trí Reload để cache...")
+                        rl = find_template(screen, "assets/buttons/reload.webp", confidence=0.85)
+                        if rl:
+                            self.reload_coords = rl
+                            print(f"[CACHE] Đã cache Reload coords: {self.reload_coords}")
+
+                    # Nhấn nút Attack 1 lần
+                    tap(current_attack_coords[0], current_attack_coords[1])
+                    time.sleep(0.5)
                 else:
-                    print("[CACHE] Chưa thấy nút Reload ở screen này, sẽ scan lại sau.")
-            else:
-                print(f"[CACHE] Dùng cache — Reload: {self.reload_coords}")
+                    print("[WARNING] Không tìm thấy nút Attack trong lượt này.")
 
-            # --- Bước B: Nhấn nút Attack 1 lần ---
-            tap(attack_coords[0], attack_coords[1])
-            time.sleep(0.5)
-            print("[ACTION] Đã nhấn Attack. Đang chờ nút Attack biến mất để reload...")
-
-            # --- Bước C: Chờ attack biến mất → reload ngay, không chờ cứng ---
-            # attack_gone = False
-            # for _ in range(60):  # Timeout tối đa 30 giây
-            #     if not self.is_running:
-            #         return
-            #     screen_check = take_screenshot()
-            #     attack_still_here = find_template(screen_check, "assets/buttons/attack.webp", confidence=0.85)
-            #     if not attack_still_here:
-            #         print("[ACTION] Nút Attack đã biến mất! Reload ngay lập tức...")
-            #         attack_gone = True
-            #         # Nếu chưa có cache reload, scan từ screen này luôn
-            #         if not self.reload_coords:
-            #             rl = find_template(screen_check, "assets/buttons/reload.webp", confidence=0.85)
-            #             if rl:
-            #                 self.reload_coords = rl
-            #                 print(f"[CACHE] Cache Reload coords (sau attack mất): {self.reload_coords}")
-            #         break
-            #     time.sleep(0.5)
-
-            # if not attack_gone:
-            #     print("[WARNING] Timeout chờ attack biến mất. Tiến hành reload anyway...")
-
-            # --- Bước D: Reload bằng tọa độ cache, không cần scan ---
-            if self.reload_coords:
-                print(f"[ACTION] Tap reload tại cache {self.reload_coords} (không scan)...")
-                tap(self.reload_coords[0], self.reload_coords[1])
+                # Reload bằng tọa độ cache hoặc fallback
+                if self.reload_coords:
+                    print(f"[ACTION] Tap reload tại cache {self.reload_coords}...")
+                    tap(self.reload_coords[0], self.reload_coords[1])
+                else:
+                    reload_page()
                 time.sleep(1.5)
-            else:
-                reload_page()  # Fallback nếu chưa cache được
 
-            # --- Bước E: Chờ màn hình EXP xuất hiện ---
-            print("[PROCESS] Đang chờ màn hình EXP/kết quả xuất hiện...")
-            found_result = False
-            for i in range(30):  # Tối đa ~15 giây
-                if not self.is_running:
-                    break
-                if self.check_is_battle_ended():
-                    found_result = True
-                    break
-                time.sleep(0.5)
+            elif self.mode == "full_auto":
+                # Chế độ Full Auto + Reload
+                print("[MODE] Đang chạy chế độ FULL AUTO + RELOAD...")
 
-            if found_result:
-                print("[SUCCESS] Đã xác nhận trận đấu kết thúc.")
-            else:
-                if self.is_running:
-                    print("[WARNING] Không phát hiện được trận kết thúc. Tiếp tục đợi...")
-                    self.wait_for_battle_finished()
-
-        elif self.mode == "full_auto":
-            # CHẾ ĐỘ FULL AUTO + RELOAD
-            print("[MODE] Đang chạy chế độ FULL AUTO + RELOAD...")
-            # screen đã có sẵn từ tham số, không cần chụp lại
-
-            # --- Bước A: Scan full_auto + reload CHỈ lần đầu, từ lần 2 dùng cache ---
-            if not self.full_auto_coords or not self.reload_coords:
-                print("[CACHE] Lần đầu chạy — scan vị trí Full Auto và Reload để cache...")
-                if not self.full_auto_coords:
-                    fa = find_template(screen, "assets/buttons/full_auto.webp", confidence=0.85)
-                    if fa:
-                        self.full_auto_coords = fa
-                        print(f"[CACHE] Đã cache Full Auto coords: {self.full_auto_coords}")
-                    else:
-                        print("[CACHE] Không tìm thấy Full Auto bằng ảnh, dùng tọa độ mặc định.")
-                if not self.reload_coords:
-                    rl = find_template(screen, "assets/buttons/reload.webp", confidence=0.85)
-                    if rl:
-                        self.reload_coords = rl
-                        print(f"[CACHE] Đã cache Reload coords: {self.reload_coords}")
-                    else:
-                        print("[CACHE] Chưa thấy nút Reload ở screen này, sẽ scan lại sau.")
-            else:
-                print(f"[CACHE] Dùng cache — Full Auto: {self.full_auto_coords}, Reload: {self.reload_coords}")
-
-            # --- Bước B: Click Full Auto bằng tọa độ cache (hoặc mặc định) ---
-            if self.full_auto_coords:
-                tap(self.full_auto_coords[0], self.full_auto_coords[1])
-            else:
-                tap(int(w * 0.15), int(h * 0.45))
-            print("[ACTION] Đã kích hoạt Full Auto. Đang chờ nút Attack biến mất để reload...")
-
-            # --- Bước C: Chờ attack biến mất → reload ngay, không chờ cứng ---
-            attack_gone = False
-            for _ in range(60):  # Timeout tối đa 30 giây
-                if not self.is_running:
-                    return
-                screen = take_screenshot()
-                attack_still_here = find_template(screen, "assets/buttons/attack.webp", confidence=0.85)
-                if not attack_still_here:
-                    print("[ACTION] Nút Attack đã biến mất! Reload ngay lập tức...")
-                    attack_gone = True
-                    # Nếu chưa có cache reload, scan từ screen này luôn
+                # Đảm bảo có cache Full Auto và Reload
+                if not self.full_auto_coords or not self.reload_coords:
+                    print("[CACHE] Scan vị trí Full Auto và Reload để cache...")
+                    if not self.full_auto_coords:
+                        fa = find_template(screen, "assets/buttons/full_auto.webp", confidence=0.85)
+                        if fa:
+                            self.full_auto_coords = fa
+                            print(f"[CACHE] Đã cache Full Auto coords: {self.full_auto_coords}")
                     if not self.reload_coords:
                         rl = find_template(screen, "assets/buttons/reload.webp", confidence=0.85)
                         if rl:
                             self.reload_coords = rl
-                            print(f"[CACHE] Cache Reload coords (sau attack mất): {self.reload_coords}")
-                    break
-                time.sleep(0.5)
+                            print(f"[CACHE] Đã cache Reload coords: {self.reload_coords}")
 
-            if not attack_gone:
-                print("[WARNING] Timeout chờ attack biến mất. Tiến hành reload anyway...")
+                # Kích hoạt Full Auto
+                if self.full_auto_coords:
+                    tap(self.full_auto_coords[0], self.full_auto_coords[1])
+                else:
+                    tap(int(w * 0.15), int(h * 0.45))
+                print("[ACTION] Đã kích hoạt Full Auto. Đang chờ nút Attack biến mất...")
 
-            # --- Bước D: Reload bằng tọa độ cache, không cần scan ---
-            if self.reload_coords:
-                print(f"[ACTION] Tap reload tại cache {self.reload_coords} (không scan)...")
-                tap(self.reload_coords[0], self.reload_coords[1])
+                # Chờ attack biến mất -> reload ngay
+                attack_gone = False
+                for _ in range(60):  # Timeout tối đa 30 giây
+                    if not self.is_running:
+                        return
+                    screen = take_screenshot()
+                    attack_still_here = find_template(screen, "assets/buttons/attack.webp", confidence=0.85)
+                    if not attack_still_here:
+                        print("[ACTION] Nút Attack đã biến mất! Reload ngay lập tức...")
+                        attack_gone = True
+                        if not self.reload_coords:
+                            rl = find_template(screen, "assets/buttons/reload.webp", confidence=0.85)
+                            if rl:
+                                self.reload_coords = rl
+                                print(f"[CACHE] Cache Reload coords: {self.reload_coords}")
+                        break
+                    time.sleep(0.5)
+
+                if not attack_gone:
+                    print("[WARNING] Timeout chờ attack biến mất. Tiến hành reload anyway...")
+
+                # Reload bằng tọa độ cache hoặc fallback
+                if self.reload_coords:
+                    print(f"[ACTION] Tap reload tại cache {self.reload_coords}...")
+                    tap(self.reload_coords[0], self.reload_coords[1])
+                else:
+                    reload_page()
                 time.sleep(1.5)
-            else:
-                reload_page()  # Fallback nếu chưa cache được
 
-            # --- Bước E: Chờ màn hình EXP xuất hiện ---
-            print("[PROCESS] Đang chờ màn hình EXP/kết quả xuất hiện...")
-            found_result = False
-            for i in range(30):  # Tối đa ~15 giây
+            # --- Bước B: Chờ sau khi reload và nhận diện trạng thái tiếp theo ---
+            print("[PROCESS] Đang chờ và nhận diện trạng thái sau reload...")
+            state_detected = None
+            
+            # Lặp kiểm tra trong khoảng tối đa 15 giây (30 lần quét x 0.5 giây)
+            for scan_i in range(30):
                 if not self.is_running:
+                    return
+
+                screen = take_screenshot()
+
+                # Quét Captcha mỗi 10 lần quét (giảm tần suất để tránh lag OCR)
+                if scan_i > 0 and scan_i % 10 == 0:
+                    if self.check_captcha(screen):
+                        print("[ALERT] PHÁT HIỆN CAPTCHA 'Access Verification'!")
+                        self.send_discord_webhook("@everyone Phát hiện Captcha 'Access Verification'! Bot đã tự động dừng.")
+                        self.is_running = False
+                        return
+
+                # 1. Kiểm tra màn hình kết quả (EXP, Loot) — dùng lại screen đã chụp, tránh chụp thêm
+                if self.check_is_battle_ended(screen):
+                    print("[SUCCESS] Trận đấu kết thúc hoàn toàn (phát hiện màn hình EXP/Loot).")
+                    state_detected = "ended"
                     break
-                if self.check_is_battle_ended():
-                    found_result = True
+
+                # 2. Kiểm tra xem nút Attack có quay lại không (quay lại combat do boss chưa chết)
+                current_attack = find_template(screen, "assets/buttons/attack.webp", confidence=0.85)
+                if current_attack:
+                    print("[INFO] Boss chưa chết! Phát hiện lại nút Attack. Tiếp tục lượt combat tiếp theo...")
+                    state_detected = "combat"
                     break
+
                 time.sleep(0.5)
 
-            if found_result:
-                print("[SUCCESS] Đã xác nhận trận đấu kết thúc.")
+            if state_detected == "ended":
+                break
+            elif state_detected == "combat":
+                # Tiếp tục vòng lặp
+                continue
             else:
-                if self.is_running:
-                    print("[WARNING] Không phát hiện được trận kết thúc. Tiếp tục đợi...")
-                    self.wait_for_battle_finished()
+                # Quá 15s không nhận diện được trạng thái kết thúc hay combat. 
+                # Có thể do game bị đơ hoặc tải trang quá chậm.
+                print("[WARNING] Không phát hiện màn hình EXP hay nút Attack sau 15s. Thử reload lại trang...")
+                if self.reload_coords:
+                    tap(self.reload_coords[0], self.reload_coords[1])
+                else:
+                    reload_page()
+                time.sleep(1.5)
+                screen = take_screenshot()
 
-    def check_is_battle_ended(self):
-        """Kiểm tra màn hình kết quả thông qua OCR (tìm chữ EXP, Loot...)."""
-        screen = take_screenshot()
+        if combat_turn >= max_turns:
+            print(f"[WARNING] Đạt giới hạn tối đa {max_turns} lượt combat. Kết thúc combat.")
+
+    def check_is_battle_ended(self, screen=None):
+        """Kiểm tra màn hình kết quả thông qua OCR (tìm chữ EXP, Loot...).
+
+        Args:
+            screen: PIL Image đã có sẵn để dùng lại, tránh chụp thêm nếu caller đã có.
+                    Nếu None sẽ tự chụp màn hình mới.
+        """
+        if screen is None:
+            screen = take_screenshot()
         w, h = screen.size
         # Vùng đọc chữ kết quả (ví dụ: EXP Gained, Loot, Results ở giữa màn hình)
         result_region = (0, int(h * 0.2), w, int(h * 0.5))
         text = get_text_from_region(screen, result_region, threshold_val=180)
-        
+
         keywords = ["EXP", "Loot", "Gained", "Result", "Concluded", "Tap"]
         for keyword in keywords:
             if keyword.lower() in text.lower():
