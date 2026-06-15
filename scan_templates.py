@@ -6,13 +6,24 @@ Công cụ chụp lại ảnh mẫu (template) từ thiết bị Android qua ADB
 Cho phép bạn chọn vùng ROI thủ công trên ảnh chụp màn hình rồi lưu thành file .webp
 để thay thế các ảnh cũ, giúp tăng confidence khi nhận diện.
 
-Các ảnh cần scan trong bot:
-  - assets/buttons/reload.webp
-  - assets/buttons/ok.webp
-  - assets/buttons/attack.webp
-  - assets/buttons/full_auto.webp
-  
-(rocket.webp đã được scan lại lần trước, bỏ qua)
+Danh sách template hiện tại (sau khi tối ưu bỏ OCR):
+
+  [NÚT BẤM - BUTTONS]
+    - assets/buttons/attack.webp       → Nút Attack (đỏ, dưới màn hình combat)
+    - assets/buttons/full_auto.webp    → Nút Full Auto (toggle góc trên trái)
+    - assets/buttons/ok.webp           → Nút OK (xác nhận trong hộp thoại)
+    - assets/buttons/reload.webp       → Nút Reload (thanh trình duyệt)
+    - assets/buttons/rocket.webp       → Nút Rocket/Play Again (góc dưới phải)
+    - assets/buttons/party_set_1.webp  → Party Set 1 (nhận diện màn Party)
+    - assets/buttons/party_set_2.webp  → Party Set 2 (nhận diện màn Party)
+    - assets/buttons/party_set_3.webp  → Party Set 3 (nhận diện màn Party)
+    - assets/buttons/party_set_4.webp  → Party Set 4 (nhận diện màn Party)
+
+  [HEADER - NHẬN DIỆN TRẠNG THÁI]
+    - assets/headers/captcha_header.webp          → Header popup Captcha
+    - assets/headers/exp_gained_header.webp        → Header EXP Gained (kết quả)
+    - assets/headers/loot_collected_header.webp    → Header Loot Collected (kết quả)
+    - assets/headers/battle_concluded_header.webp  → Header Battle Concluded (kết quả)
 
 Cách dùng:
   python scan_templates.py
@@ -50,34 +61,82 @@ def auto_detect_device():
         print(f"[ADB] Lỗi quét thiết bị qua adbutils: {e}")
         return False
 
-# Danh sách các ảnh cần scan lại
-# (tên hiển thị, đường dẫn file đích, gợi ý về nơi tìm element trên màn hình)
-TEMPLATES_TO_SCAN = [
+# ==================== DANH SÁCH TEMPLATE ====================
+# Nhóm 1: Các nút bấm (Buttons) — dùng trực tiếp trong combat loop
+BUTTON_TEMPLATES = [
     {
         "name": "Attack Button",
         "path": "assets/buttons/attack.webp",
-        "hint": "Tìm và kéo chọn vùng quanh NÚT ATTACK (nút đỏ lớn ở dưới màn hình chiến đấu)",
-        "skipped": False,
+        "hint": "Tìm NÚT ATTACK (nút đỏ lớn ở dưới màn hình chiến đấu)",
     },
     {
         "name": "Full Auto Button",
         "path": "assets/buttons/full_auto.webp",
-        "hint": "Tìm và kéo chọn vùng quanh CHỮ 'Full Auto' (nút toggle ở góc trên trái khu vực chiến đấu)",
-        "skipped": False,
+        "hint": "Tìm CHỮ 'Full Auto' (nút toggle ở góc trên trái khu vực chiến đấu)",
     },
     {
         "name": "OK Button",
         "path": "assets/buttons/ok.webp",
-        "hint": "Tìm và kéo chọn vùng quanh NÚT OK (nút xác nhận trong hộp thoại)",
-        "skipped": False,
+        "hint": "Tìm NÚT OK (nút xác nhận trong hộp thoại)",
     },
     {
         "name": "Reload Button",
         "path": "assets/buttons/reload.webp",
-        "hint": "Tìm và kéo chọn vùng quanh BIỂU TƯỢNG TẢI LẠI TRANG (nút reload trên thanh trình duyệt)",
-        "skipped": False,
+        "hint": "Tìm BIỂU TƯỢNG TẢI LẠI TRANG (nút reload trên thanh trình duyệt)",
+    },
+    {
+        "name": "Rocket / Play Again",
+        "path": "assets/buttons/rocket.webp",
+        "hint": "Tìm NÚT ROCKET (nút play again, thường ở góc dưới phải màn kết quả)",
+    },
+    {
+        "name": "Party Set 1",
+        "path": "assets/buttons/party_set_1.webp",
+        "hint": "Tìm ảnh mẫu Party Set 1 (để nhận diện màn hình Party)",
+    },
+    {
+        "name": "Party Set 2",
+        "path": "assets/buttons/party_set_2.webp",
+        "hint": "Tìm ảnh mẫu Party Set 2 (để nhận diện màn hình Party)",
+    },
+    {
+        "name": "Party Set 3",
+        "path": "assets/buttons/party_set_3.webp",
+        "hint": "Tìm ảnh mẫu Party Set 3 (để nhận diện màn hình Party)",
+    },
+    {
+        "name": "Party Set 4",
+        "path": "assets/buttons/party_set_4.webp",
+        "hint": "Tìm ảnh mẫu Party Set 4 (để nhận diện màn hình Party)",
     },
 ]
+
+# Nhóm 2: Header nhận diện trạng thái — dùng thay thế OCR
+HEADER_TEMPLATES = [
+    {
+        "name": "Captcha Header",
+        "path": "assets/headers/captcha_header.webp",
+        "hint": "Tìm TIÊU ĐỀ 'Access Verification' (popup captcha, phần header phía trên)",
+    },
+    {
+        "name": "EXP Gained Header",
+        "path": "assets/headers/exp_gained_header.webp",
+        "hint": "Tìm TIÊU ĐỀ 'EXP Gained' (header màn hình kết quả trận đấu)",
+    },
+    {
+        "name": "Loot Collected Header",
+        "path": "assets/headers/loot_collected_header.webp",
+        "hint": "Tìm TIÊU ĐỀ 'Loot Collected' (header màn hình nhận phần thưởng)",
+    },
+    {
+        "name": "Battle Concluded Header",
+        "path": "assets/headers/battle_concluded_header.webp",
+        "hint": "Tìm TIÊU ĐỀ 'Battle Concluded' (header khi trận đấu kết thúc)",
+    },
+]
+
+# Gộp tất cả template lại
+ALL_TEMPLATES = BUTTON_TEMPLATES + HEADER_TEMPLATES
 
 
 # ==================== ADB HELPER ====================
@@ -134,24 +193,30 @@ def run_adb(command):
 
 
 def take_screenshot():
-    """Chụp màn hình qua ADB, trả về ảnh dạng numpy array (BGR cho OpenCV)."""
+    """Chụp màn hình qua adbutils, trả về ảnh dạng numpy array (BGR cho OpenCV)."""
     print("[ADB] Đang chụp màn hình thiết bị...")
-    raw_data = run_adb(['shell', 'screencap', '-p'])
-    if not raw_data:
-        raise RuntimeError("Không thể chụp màn hình từ thiết bị. Kiểm tra kết nối ADB!")
-
-    # Sửa lỗi line ending trên Windows
-    if os.name == 'nt':
-        raw_data = raw_data.replace(b'\r\n', b'\n')
-
-    nparr = np.frombuffer(raw_data, np.uint8)
-    img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    if img_bgr is None:
-        # Fallback dùng PIL
-        pil_img = Image.open(io.BytesIO(raw_data)).convert("RGB")
+    try:
+        device = adbutils.adb.device(serial=DEVICE_ADDRESS)
+        pil_img = device.screenshot()
         img_bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+        return img_bgr
+    except Exception as e:
+        print(f"[ADB WARNING] adbutils screenshot lỗi ({e}), thử fallback subprocess...")
+        # Fallback sang subprocess
+        raw_data = run_adb(['shell', 'screencap', '-p'])
+        if not raw_data:
+            raise RuntimeError("Không thể chụp màn hình từ thiết bị. Kiểm tra kết nối ADB!")
 
-    return img_bgr
+        if os.name == 'nt':
+            raw_data = raw_data.replace(b'\r\n', b'\n')
+
+        nparr = np.frombuffer(raw_data, np.uint8)
+        img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img_bgr is None:
+            pil_img = Image.open(io.BytesIO(raw_data)).convert("RGB")
+            img_bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+
+        return img_bgr
 
 
 # ==================== HIỂN THỊ & CHỌN VÙNG ROI ====================
@@ -368,9 +433,10 @@ def verify_confidence(screenshot_bgr, template_path, expected_min=0.75):
 
 # ==================== MAIN ====================
 def main():
-    print("=" * 65)
+    print("=" * 70)
     print("   GBF BOT - CÔNG CỤ SCAN LẠI ẢNH TEMPLATE (scan_templates.py)")
-    print("=" * 65)
+    print("   Phiên bản tối ưu: Bao gồm cả Button + Header templates")
+    print("=" * 70)
     print()
     print("Hướng dẫn:")
     print("  1. Đảm bảo thiết bị Android / giả lập đang kết nối ADB")
@@ -394,28 +460,51 @@ def main():
         print(f"[ADB] Đang sử dụng thiết bị: {DEVICE_ADDRESS}\n")
 
     while True:
-        print("\n" + "=" * 50)
-        print("  DANH SÁCH CÁC NÚT CẦN SCAN:")
-        for idx, tmpl in enumerate(TEMPLATES_TO_SCAN):
-            status = "[Đã có file]" if os.path.exists(tmpl['path']) else "[Chưa có file]"
-            print(f"  [{idx + 1}] {tmpl['name']} - {tmpl['path']} {status}")
-        print("  [A] Quét tất cả các nút theo thứ tự")
-        print("  [Q] Thoát chương trình")
-        print("=" * 50)
+        print("\n" + "=" * 70)
+        print("  DANH SÁCH CÁC TEMPLATE CẦN SCAN:")
+        print()
         
-        choice = input("\nNhập lựa chọn của bạn (1-4, A, Q): ").strip().lower()
+        # Hiển thị nhóm Buttons
+        print("  --- NÚT BẤM (Buttons) ---")
+        for idx, tmpl in enumerate(BUTTON_TEMPLATES):
+            status = "✓ Có file" if os.path.exists(tmpl['path']) else "✗ Chưa có"
+            print(f"  [{idx + 1:2d}] {tmpl['name']:<25s} [{status}]  {tmpl['path']}")
+        
+        print()
+        offset = len(BUTTON_TEMPLATES)
+        
+        # Hiển thị nhóm Headers
+        print("  --- HEADER NHẬN DIỆN (thay thế OCR) ---")
+        for idx, tmpl in enumerate(HEADER_TEMPLATES):
+            num = offset + idx + 1
+            status = "✓ Có file" if os.path.exists(tmpl['path']) else "✗ Chưa có"
+            print(f"  [{num:2d}] {tmpl['name']:<25s} [{status}]  {tmpl['path']}")
+        
+        print()
+        print("  --- THAO TÁC NHANH ---")
+        print("  [B] Quét tất cả Buttons")
+        print("  [H] Quét tất cả Headers")
+        print("  [A] Quét TẤT CẢ templates")
+        print("  [Q] Thoát chương trình")
+        print("=" * 70)
+        
+        choice = input(f"\nNhập lựa chọn (1-{len(ALL_TEMPLATES)}, B, H, A, Q): ").strip().lower()
         if choice == 'q':
             print("[EXIT] Đã thoát chương trình.")
             break
             
         selected_templates = []
         if choice == 'a':
-            selected_templates = TEMPLATES_TO_SCAN
+            selected_templates = ALL_TEMPLATES
+        elif choice == 'b':
+            selected_templates = BUTTON_TEMPLATES
+        elif choice == 'h':
+            selected_templates = HEADER_TEMPLATES
         else:
             try:
                 val = int(choice)
-                if 1 <= val <= len(TEMPLATES_TO_SCAN):
-                    selected_templates = [TEMPLATES_TO_SCAN[val - 1]]
+                if 1 <= val <= len(ALL_TEMPLATES):
+                    selected_templates = [ALL_TEMPLATES[val - 1]]
                 else:
                     print("[ERROR] Lựa chọn không hợp lệ!")
                     continue
@@ -425,11 +514,11 @@ def main():
 
         # Tiến hành scan các template đã chọn
         for tmpl in selected_templates:
-            print(f"\n{'='*65}")
+            print(f"\n{'='*70}")
             print(f"  BẮT ĐẦU SCAN: {tmpl['name']}")
             print(f"  File đích: {tmpl['path']}")
             print(f"  Gợi ý: {tmpl['hint']}")
-            print(f"{'='*65}")
+            print(f"{'='*70}")
 
             input(f"\n  -> Điều hướng game đến màn hình có [{tmpl['name']}], rồi nhấn ENTER để chụp màn hình...")
 

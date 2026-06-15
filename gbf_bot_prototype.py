@@ -3,28 +3,14 @@ import time
 import os
 import cv2
 import numpy as np
-import pytesseract
 from PIL import Image
 import urllib.request
 import json
+import adbutils
 
-# ==================== CẤU HÌNH TESSERACT ====================
-# Thiết lập đường dẫn tới Tesseract executable (tương tự UMAT)
-if os.name == 'nt':
-    possible_paths = [
-        r'C:\Program Files\Tesseract-OCR\tesseract.exe',
-        r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
-        r'C:\Users\{}\AppData\Local\Programs\Tesseract-OCR\tesseract.exe'.format(
-            os.getenv('USERNAME', '')
-        )
-    ]
-    for path in possible_paths:
-        if os.path.exists(path):
-            pytesseract.pytesseract.tesseract_cmd = path
-            break
-
-# ==================== KẾT NỐI ADB & ĐIỀU KHIỂN ====================
+# ==================== KẾT NỐI ADB & ĐIỀU KHIỂN (adbutils) ====================
 DEVICE_ADDRESS = None  # Sẽ được gán tự động qua auto_detect_device()
+_adb_device = None     # adbutils.AdbDevice — dùng cho screenshot/tap/swipe nhanh
 
 
 def get_adb_path():
@@ -66,60 +52,67 @@ def get_adb_path():
 
 def auto_detect_device():
     """
-    Tự động quét và chọn thiết bị ADB đang online.
-    - Nếu chỉ có 1 thiết bị → chọn luôn.
-    - Nếu có nhiều thiết bị → in danh sách và chọn cái đầu tiên.
-    - Nếu không có thiết bị nào → báo lỗi và thoát.
+    Tự động quét và chọn thiết bị ADB đang online thông qua adbutils (socket trực tiếp).
+    Nhanh hơn so với subprocess vì không cần spawn process mới mỗi lần gọi.
     """
-    global DEVICE_ADDRESS
-    adb_path = get_adb_path()
+    global DEVICE_ADDRESS, _adb_device
     try:
-        result = subprocess.run(
-            [adb_path, 'devices'],
-            capture_output=True, text=True, shell=True, timeout=10
-        )
-        output = result.stdout.strip()
+        devices = adbutils.adb.device_list()
     except Exception as e:
-        print(f"[ADB ERROR] Không thể chạy 'adb devices': {e}")
+        print(f"[ADB ERROR] Không thể quét thiết bị qua adbutils: {e}")
         return False
 
-    lines = output.splitlines()
-    # Dòng đầu là header "List of devices attached", bỏ qua
-    device_lines = [
-        line for line in lines[1:]
-        if line.strip() and 'offline' not in line and 'unauthorized' not in line
-    ]
-
-    online_devices = []
-    for line in device_lines:
-        parts = line.split()
-        if len(parts) >= 2 and parts[1] == 'device':
-            online_devices.append(parts[0])
-
-    if not online_devices:
+    if not devices:
         print("[ADB ERROR] Không tìm thấy thiết bị ADB nào đang kết nối!")
         print("[ADB INFO] Hãy chắc chắn:")
         print("           - Thiết bị đã bật USB Debugging / Wireless Debugging")
         print("           - Giả lập (emulator) đang chạy")
-        print(f"[ADB RAW OUTPUT]\n{output}")
         return False
 
-    if len(online_devices) == 1:
-        DEVICE_ADDRESS = online_devices[0]
+    if len(devices) == 1:
+        _adb_device = devices[0]
+        DEVICE_ADDRESS = _adb_device.serial
         print(f"[ADB] Tự động chọn thiết bị duy nhất: {DEVICE_ADDRESS}")
     else:
-        print(f"[ADB] Phát hiện {len(online_devices)} thiết bị đang kết nối:")
-        for i, dev in enumerate(online_devices):
-            print(f"      [{i}] {dev}")
-        # Mặc định chọn thiết bị đầu tiên
-        DEVICE_ADDRESS = online_devices[0]
+        print(f"[ADB] Phát hiện {len(devices)} thiết bị đang kết nối:")
+        for i, dev in enumerate(devices):
+            print(f"      [{i}] {dev.serial}")
+        _adb_device = devices[0]
+        DEVICE_ADDRESS = _adb_device.serial
         print(f"[ADB] Tự động chọn thiết bị đầu tiên: {DEVICE_ADDRESS}")
         print("[ADB INFO] Để chọn thiết bị khác, sửa biến DEVICE_ADDRESS thủ công.")
 
     return True
 
+
+def connect_device(address):
+    """
+    Kết nối tới thiết bị ADB theo địa chỉ cụ thể (dùng bởi GUI).
+    Tạo adbutils device object để dùng cho các thao tác nhanh.
+    """
+    global DEVICE_ADDRESS, _adb_device
+    try:
+        # Thử connect nếu là wireless device (có dấu ":")
+        if ":" in address:
+            try:
+                adbutils.adb.connect(address, timeout=3.0)
+            except Exception:
+                pass  # Có thể đã kết nối sẵn
+        _adb_device = adbutils.adb.device(serial=address)
+        DEVICE_ADDRESS = address
+        print(f"[ADB] Đã kết nối thiết bị qua adbutils: {DEVICE_ADDRESS}")
+        return True
+    except Exception as e:
+        print(f"[ADB ERROR] Không thể kết nối tới {address} qua adbutils: {e}")
+        # Fallback: chỉ set DEVICE_ADDRESS cho run_adb subprocess
+        DEVICE_ADDRESS = address
+        _adb_device = None
+        print(f"[ADB WARNING] Fallback: dùng subprocess cho thiết bị {address}")
+        return True
+
+
 def run_adb(command):
-    """Thực thi một lệnh ADB."""
+    """Thực thi một lệnh ADB qua subprocess (giữ lại cho backward compatibility với GUI)."""
     adb_path = get_adb_path()
     full_cmd = [adb_path]
     if DEVICE_ADDRESS:
@@ -139,38 +132,35 @@ def run_adb(command):
         return None
 
 def take_screenshot():
-    """Chụp màn hình qua ADB và trả về đối tượng PIL Image (tương tự UMAT)."""
-    raw_data = run_adb(['shell', 'screencap', '-p'])
-    if not raw_data:
-        raise Exception("Không thể chụp màn hình từ thiết bị qua ADB")
-    
-    # Sửa lỗi ký tự xuống dòng trên Windows (\r\n -> \n)
-    if os.name == 'nt':
-        raw_data = raw_data.replace(b'\r\n', b'\n')
-        
-    # Tạo PIL Image từ dữ liệu bytes
+    """
+    Chụp màn hình qua adbutils (socket trực tiếp) — nhanh hơn ~2x so với subprocess.
+    Trả về đối tượng PIL Image.
+    """
+    global _adb_device
+    if _adb_device is None:
+        raise Exception("Chưa kết nối thiết bị ADB! Gọi auto_detect_device() hoặc connect_device() trước.")
     try:
-        # Có thể dùng OpenCV hoặc PIL trực tiếp
-        # Chuyển bytes thô thành numpy array để OpenCV xử lý nếu cần
-        nparr = np.frombuffer(raw_data, np.uint8)
-        img_np = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        # Chuyển BGR (OpenCV) thành RGB (PIL)
-        img_rgb = cv2.cvtColor(img_np, cv2.COLOR_BGR2RGB)
-        return Image.fromarray(img_rgb)
+        return _adb_device.screenshot()
     except Exception as e:
-        print(f"[ERROR] Giải mã ảnh chụp màn hình lỗi: {e}")
-        # Phương pháp thay thế dùng PIL trực tiếp
-        import io
-        return Image.open(io.BytesIO(raw_data))
+        print(f"[ERROR] Chụp màn hình lỗi: {e}")
+        raise Exception(f"Không thể chụp màn hình từ thiết bị: {e}")
 
 def tap(x, y):
-    """Chạm vào tọa độ (x, y) trên màn hình."""
+    """Chạm vào tọa độ (x, y) trên màn hình — dùng adbutils (nhanh hơn subprocess)."""
+    global _adb_device
     print(f"[INPUT] Tap tại tọa độ: ({x}, {y})")
-    run_adb(['shell', 'input', 'tap', str(int(x)), str(int(y))])
+    if _adb_device:
+        _adb_device.click(int(x), int(y))
+    else:
+        run_adb(['shell', 'input', 'tap', str(int(x)), str(int(y))])
 
 def swipe(x1, y1, x2, y2, duration_ms=500):
-    """Vuốt màn hình từ (x1, y1) đến (x2, y2)."""
-    run_adb(['shell', 'input', 'swipe', str(x1), str(y1), str(x2), str(y2), str(duration_ms)])
+    """Vuốt màn hình từ (x1, y1) đến (x2, y2) — dùng adbutils."""
+    global _adb_device
+    if _adb_device:
+        _adb_device.swipe(int(x1), int(y1), int(x2), int(y2), duration_ms / 1000.0)
+    else:
+        run_adb(['shell', 'input', 'swipe', str(x1), str(y1), str(x2), str(y2), str(duration_ms)])
 
 def reload_page():
     """Tải lại trang trình duyệt trong game."""
@@ -198,88 +188,69 @@ def reload_page():
     except Exception as e:
         print(f"[WARNING] Cử chỉ vuốt tải lại lỗi: {e}")
         
-    # Cách 3: Gửi phím F5 qua ADB keyevent 135
+    # Cách 3: Gửi phím F5 qua ADB keyevent
     print("[ACTION] Gửi keyevent F5 qua ADB...")
-    run_adb(['shell', 'input', 'keyevent', '135'])
+    if _adb_device:
+        _adb_device.shell("input keyevent 135")
+    else:
+        run_adb(['shell', 'input', 'keyevent', '135'])
     time.sleep(1.5)  # Giảm từ 3.0s → 1.5s
 
-# ==================== XỬ LÝ ẢNH & TESSERACT OCR ====================
-def preprocess_for_ocr(pil_img, threshold_val=180):
-    """
-    Tiền xử lý ảnh giống UMAT để tăng độ chính xác của OCR.
-    Chuyển về ảnh xám và nhị phân hóa (thresholding) để nổi bật chữ trắng/đen.
-    """
-    img_np = np.array(pil_img)
-    # Chuyển sang ảnh xám
-    gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-    # Nhị phân hóa
-    _, thresh = cv2.threshold(gray, threshold_val, 255, cv2.THRESH_BINARY)
-    return thresh
-
-def get_text_from_region(pil_img, region=None, threshold_val=180, scale_factor=1):
-    """
-    Trích xuất chữ từ vùng chỉ định trên ảnh chụp màn hình sử dụng Tesseract.
-    
-    Args:
-        pil_img: PIL Image
-        region: Tuple (left, top, right, bottom). Nếu None, sẽ OCR toàn bộ ảnh.
-        threshold_val: Giá trị ngưỡng nhị phân hóa.
-        scale_factor: Hệ số phóng to ảnh (mặc định = 1, không phóng to).
-    """
-    if region:
-        cropped = pil_img.crop(region)
-    else:
-        cropped = pil_img
-        
-    if scale_factor > 1:
-        w, h = cropped.size
-        try:
-            resample_filter = Image.Resampling.LANCZOS
-        except AttributeError:
-            resample_filter = Image.LANCZOS
-        cropped = cropped.resize((int(w * scale_factor), int(h * scale_factor)), resample_filter)
-        
-    # Áp dụng tiền xử lý
-    processed_np = preprocess_for_ocr(cropped, threshold_val)
-    
-    # Chuyển lại sang PIL để đưa vào Tesseract
-    processed_pil = Image.fromarray(processed_np)
-    
-    # Cấu hình tesseract chạy nhanh (PSM 6: Giả định một khối văn bản đồng nhất)
-    custom_config = r'--oem 3 --psm 6'
-    try:
-        text = pytesseract.image_to_string(processed_pil, config=custom_config, lang='eng')
-        return text.strip()
-    except Exception as e:
-        print(f"[OCR ERROR] Không thể nhận diện văn bản: {e}")
-        return ""
-
+# ==================== TEMPLATE MATCHING (THAY THẾ OCR — NHANH HƠN ~50-100x) ====================
 # Cache ảnh template trong RAM để tránh đọc disk mỗi lần gọi find_template
 _template_cache = {}
 
-def find_template(screen_pil, template_path, confidence=0.8, region=None):
-    """ Tìm kiếm template hình ảnh trên màn hình bằng OpenCV (hỗ trợ giới hạn vùng quét)."""
+def find_template(screen_pil, template_path, confidence=0.8, region=None, grayscale=False):
+    """
+    Tìm kiếm template hình ảnh trên màn hình bằng OpenCV (hỗ trợ giới hạn vùng quét).
+    
+    Args:
+        screen_pil: PIL Image chụp màn hình.
+        template_path: Đường dẫn tới file ảnh template.
+        confidence: Ngưỡng confidence tối thiểu (0.0 - 1.0).
+        region: Tuple (left, top, right, bottom) giới hạn vùng quét — giảm thời gian matching.
+        grayscale: Nếu True, chuyển sang ảnh xám trước khi matching (nhanh hơn ~30%).
+    """
     global _template_cache
+    screen_pil_original = screen_pil
     if region:
         # region: (left, top, right, bottom)
         screen_pil = screen_pil.crop(region)
-        
-    screen_np = cv2.cvtColor(np.array(screen_pil), cv2.COLOR_RGB2BGR)
-
+    
+    screen_np = np.array(screen_pil)
+    
+    # Chuyển đổi màu theo chế độ
+    if grayscale:
+        screen_cv = cv2.cvtColor(screen_np, cv2.COLOR_RGB2GRAY)
+        cache_key = f"{template_path}__gray"
+    else:
+        screen_cv = cv2.cvtColor(screen_np, cv2.COLOR_RGB2BGR)
+        cache_key = template_path
+    
     # Dùng cache để tránh đọc file từ disk mỗi lần (tiết kiệm ~10-50ms/call)
-    if template_path not in _template_cache:
-        template = cv2.imread(template_path)
+    if cache_key not in _template_cache:
+        if grayscale:
+            template = cv2.imread(template_path, cv2.IMREAD_GRAYSCALE)
+        else:
+            template = cv2.imread(template_path)
         if template is None:
             print(f"[ERROR] Không tìm thấy file template tại: {template_path}")
             return None
-        _template_cache[template_path] = template
-    template = _template_cache[template_path]
+        _template_cache[cache_key] = template
+    template = _template_cache[cache_key]
         
     h, w = template.shape[:2]
-    res = cv2.matchTemplate(screen_np, template, cv2.TM_CCOEFF_NORMED)
+    sh, sw = screen_cv.shape[:2]
+    
+    # Kiểm tra kích thước để tránh lỗi OpenCV assertion
+    if sw < w or sh < h:
+        print(f"[WARNING] Vùng quét ({sw}x{sh}) nhỏ hơn template ({w}x{h}). Tự động quét toàn màn hình...")
+        return find_template(screen_pil_original, template_path, confidence, region=None, grayscale=grayscale)
+
+    res = cv2.matchTemplate(screen_cv, template, cv2.TM_CCOEFF_NORMED)
     min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
     
-    print(f"[DEBUG] Khớp ảnh '{template_path}': độ tương đồng tối đa = {max_val:.3f} (yêu cầu >= {confidence})")
+    print(f"[DEBUG] Khớp ảnh '{template_path}': {max_val:.3f} (>= {confidence})")
     
     if max_val >= confidence:
         # Trả về tâm của ảnh template
@@ -301,6 +272,8 @@ class GBFController:
         self.full_auto_coords = None  # Cache tọa độ nút Full Auto — scan 1 lần dùng mãi
         self.reload_coords    = None  # Cache tọa độ nút Reload    — scan 1 lần dùng mãi
         self.ok_coords        = None  # Cache tọa độ nút OK        — scan 1 lần dùng mãi
+        self.attack_coords    = None  # Cache tọa độ nút Attack    — scan 1 lần dùng mãi
+        self.attack_region    = None  # Cache vùng quét của nút Attack (cực nhanh)
 
     def send_discord_webhook(self, message):
         """Gửi thông báo tới Discord Webhook."""
@@ -319,144 +292,39 @@ class GBFController:
         except Exception as e:
             print(f"[DISCORD ERROR] Lỗi khi gửi webhook: {e}")
 
-    def is_captcha_text(self, text):
-        """Kiểm tra xem chuỗi text có chứa các dấu hiệu của Captcha không (sử dụng Fuzzy Matching & Levenshtein)."""
-        if not text:
-            return False
-            
-        import re
-        import unicodedata
-        
-        # Chuẩn hóa Unicode (phát hiện và chuyển đổi các ký tự đặc biệt/ligature như ﬁ -> fi)
-        text_lower = text.lower()
-        text_normalized = unicodedata.normalize('NFKD', text_lower)
-        
-        # 1. Khớp chính xác cụm từ hoặc kiểm tra các từ khóa bảo mật khác
-        if "access verification" in text_normalized:
-            return True
-            
-        # 2. Kiểm tra sự xuất hiện đồng thời của các biến thể Access và Verification
-        access_patterns = ["access", "acess", "acces", "accs", "aqcess"]
-        verification_patterns = ["verification", "verif", "verify", "ver1fication", "venification", "verfication"]
-        
-        has_access = any(p in text_normalized for p in access_patterns)
-        has_verification = any(p in text_normalized for p in verification_patterns)
-        if has_access and has_verification:
-            return True
-            
-        # 3. Sử dụng thuật toán Levenshtein Distance kiểm tra từng từ đơn lẻ
-        words = re.findall(r'[a-z0-9]+', text_normalized)
-        
-        def levenshtein_distance(s1, s2):
-            if len(s1) < len(s2):
-                return levenshtein_distance(s2, s1)
-            if len(s2) == 0:
-                return len(s1)
-            previous_row = range(len(s2) + 1)
-            for i, c1 in enumerate(s1):
-                current_row = [i + 1]
-                for j, c2 in enumerate(s2):
-                    insertions = previous_row[j + 1] + 1
-                    deletions = current_row[j] + 1
-                    substitutions = previous_row[j] + (c1 != c2)
-                    current_row.append(min(insertions, deletions, substitutions))
-                previous_row = current_row
-            return previous_row[-1]
-
-        found_access_fuzzy = False
-        found_verification_fuzzy = False
-        
-        for w in words:
-            if len(w) >= 4:
-                # Từ gần giống "access" (khoảng cách <= 2)
-                if levenshtein_distance(w, "access") <= 2:
-                    found_access_fuzzy = True
-                # Từ gần giống "verification" (khoảng cách <= 3)
-                if levenshtein_distance(w, "verification") <= 3:
-                    found_verification_fuzzy = True
-                # Từ gần giống "verify" (khoảng cách <= 1)
-                if levenshtein_distance(w, "verify") <= 1:
-                    found_verification_fuzzy = True
-                    
-        if found_access_fuzzy and found_verification_fuzzy:
-            return True
-            
-        return False
-
     def check_captcha(self, screen):
-        """Kiểm tra màn hình xem có Captcha 'Access Verification' không."""
+        """
+        Kiểm tra màn hình xem có Captcha 'Access Verification' không.
+        Dùng Template Matching thay OCR — nhanh hơn ~50-100x (~20ms thay vì ~1500ms).
+        """
         w, h = screen.size
-        # Quét khu vực giữa màn hình nơi popup Captcha thường xuất hiện
-        region = (0, int(h * 0.2), w, int(h * 0.8))
-
-        # scale_factor=1: captcha text đủ lớn để OCR không cần phóng to
-        # → tiết kiệm ~800-1500ms so với scale_factor=2
-        text = get_text_from_region(screen, region, threshold_val=150, scale_factor=1)
-        if self.is_captcha_text(text):
+        # Captcha popup thường xuất hiện ở vùng giữa-trên màn hình
+        captcha_region = (0, int(h * 0.15), w, int(h * 0.55))
+        
+        result = find_template(screen, "assets/headers/captcha_header.webp",
+                               confidence=0.75, region=captcha_region, grayscale=True)
+        if result:
             return True
-
-        # Fallback threshold khác (không phóng to để tránh lag)
-        text_fallback = get_text_from_region(screen, region, threshold_val=200, scale_factor=1)
-        if self.is_captcha_text(text_fallback):
-            return True
-
         return False
 
     def detect_start_screen(self):
-        """Kiểm tra xem đang ở màn hình Chọn Summon hay màn hình Chọn Party."""
+        """
+        Kiểm tra đang ở màn hình Chọn Party.
+        Dùng Template Matching thay OCR.
+        """
         print("[PROCESS] Đang nhận diện màn hình khởi đầu...")
         screen = take_screenshot()
-        w, h = screen.size
-        title_region = (0, int(h * 0.05), w, int(h * 0.18))
         
-        extracted_text = get_text_from_region(screen, title_region, threshold_val=150)
-        print(f"[OCR RESULT] Nhận diện màn hình: '{extracted_text}'")
-        
-        # Kiểm tra màn hình chọn Summon
-        summon_keywords = ["Summon", "Select", "Support", "Chon"]
-        for kw in summon_keywords:
-            if kw.lower() in extracted_text.lower():
-                return "summon"
-                
-        # Kiểm tra màn hình chọn Party
-        party_keywords = ["Party", "Set A", "Set B", "Ex A", "Ex B", "Choose"]
-        for kw in party_keywords:
-            if kw.lower() in extracted_text.lower():
-                return "party"
+        # Kiểm tra màn hình chọn Party bằng các template party set 1-4
+        for i in range(1, 5):
+            party_tpl = f"assets/buttons/party_set_{i}.webp"
+            if os.path.exists(party_tpl):
+                party = find_template(screen, party_tpl, confidence=0.80, grayscale=True)
+                if party:
+                    print(f"[DETECT] Nhận diện: Màn hình Chọn Party (khớp {os.path.basename(party_tpl)})")
+                    return "party"
                 
         return "unknown"
-
-    def select_summon_and_start(self):
-        """Bước 2: Tìm và click chọn summon đầu tiên -> Nhấp nút OK trên hộp thoại xác nhận."""
-        screen = take_screenshot()
-        w, h = screen.size
-        
-        # Giả lập việc chọn summon hỗ trợ đầu tiên: Thường nằm khoảng 25% chiều cao màn hình.
-        # Nhấp vào summon đầu tiên
-        print("[ACTION] Chọn Summon hỗ trợ đầu tiên...")
-        tap(w // 2, int(h * 0.25))
-        time.sleep(2.0)
-        
-        # Vuốt màn hình lên (cuộn trang xuống) để đưa nút OK bị khuất lên hiển thị
-        print("[ACTION] Vuốt màn hình lên để đưa nút OK lên vùng hiển thị...")
-        swipe(w // 2, int(h * 0.8), w // 2, int(h * 0.4), 300)
-        time.sleep(1.5)
-        
-        # Kiểm tra hộp thoại xác nhận bắt đầu trận đấu, tìm nút "OK" bằng Template Matching hoặc OCR
-        print("[ACTION] Tìm nút OK để bắt đầu phó bản...")
-        screen = take_screenshot()
-        
-        # Cách 1: Sử dụng Template Matching để tìm nút OK
-        ok_coords = find_template(screen, "assets/buttons/ok.webp", confidence=0.85)
-        if ok_coords:
-            tap(ok_coords[0], ok_coords[1])
-        else:
-            # Cách 2: Tọa độ nút OK mặc định (ví dụ ở giữa dưới hộp thoại, khoảng 60% chiều cao)
-            print("[WARNING] Không tìm thấy nút OK bằng ảnh mẫu, nhấp tọa độ mặc định.")
-            tap(w // 2, int(h * 0.60))
-            
-        time.sleep(1.0) # Đợi tải vào trận đấu (chuyển sang wait_for_combat_start để xử lý Captcha)
-
     def cache_rocket_coords(self):
         """
         Scan nút rocket 1 lần khi khởi động và lưu tọa độ.
@@ -482,28 +350,46 @@ class GBFController:
         start_time = time.time()  # Đo thời gian thực thay vì estimate
         while self.is_running:
             screen = take_screenshot()
+            w, h = screen.size
 
-            # Quét Captcha mỗi 10 lần lặp (thay vì 3) để giảm lag OCR
+            # Quét Captcha mỗi 15 lần lặp (~1.5 giây một lần)
             # Bỏ qua lần đầu (attempt=0) vì game chưa load, captcha chưa thể xuất hiện
-            if attempt > 0 and attempt % 10 == 0:
+            if attempt > 0 and attempt % 15 == 0:
                 if self.check_captcha(screen):
                     print("[ALERT] PHÁT HIỆN CAPTCHA 'Access Verification'!")
                     self.send_discord_webhook("@everyone Phát hiện Captcha 'Access Verification'! Bot đã tự động dừng.")
                     self.is_running = False
                     return None, None
 
-            attack_btn = find_template(screen, "assets/buttons/attack.webp", confidence=0.85)
+            # Sử dụng vùng quét giới hạn để tăng tốc nhận diện nút Attack
+            if self.attack_region:
+                search_region = self.attack_region
+            else:
+                search_region = (int(w * 0.45), int(h * 0.3), w, int(h * 0.85))
+
+            attack_btn = find_template(screen, "assets/buttons/attack.webp", confidence=0.85, region=search_region)
             if attack_btn:
                 elapsed = time.time() - start_time
                 print(f"[SUCCESS] Đã phát hiện nút Attack sau {elapsed:.1f} giây!")
+                
+                # Lưu cache tọa độ và vùng quét nhỏ xung quanh
+                self.attack_coords = attack_btn
+                self.attack_region = (
+                    max(0, attack_btn[0] - 200),
+                    max(0, attack_btn[1] - 150),
+                    min(w, attack_btn[0] + 200),
+                    min(h, attack_btn[1] + 150)
+                )
+                print(f"[CACHE] Đã lưu tọa độ Attack: {self.attack_coords}, Vùng quét: {self.attack_region}")
+                
                 # Trả về cả screen để play_combat dùng lại, tránh chụp thêm
                 return attack_btn, screen
 
             attempt += 1
-            if attempt % 10 == 0:
+            if attempt % 50 == 0:
                 elapsed = time.time() - start_time
                 print(f"[INFO] Vẫn đang đợi tải vào trận đấu (đã quét {attempt} lần, {elapsed:.1f}s thực tế)...")
-            time.sleep(0.5)
+            time.sleep(0.02)
 
         return None, None
 
@@ -534,8 +420,8 @@ class GBFController:
                 # Chế độ Auto Spam Attack
                 print("[MODE] Đang chạy chế độ AUTO (Nhấn Attack → reload)...")
 
-                # Lần đầu tiên sử dụng attack_coords truyền vào, các lượt sau tự scan tìm nút Attack
-                current_attack_coords = attack_coords if combat_turn == 1 else find_template(screen, "assets/buttons/attack.webp", confidence=0.85)
+                # Lần đầu tiên sử dụng attack_coords truyền vào, các lượt sau tự scan tìm nút Attack (sử dụng cache region)
+                current_attack_coords = attack_coords if combat_turn == 1 else find_template(screen, "assets/buttons/attack.webp", confidence=0.85, region=self.attack_region)
 
                 if current_attack_coords:
                     # Cache reload nếu chưa có
@@ -587,11 +473,11 @@ class GBFController:
 
                 # Chờ attack biến mất -> reload ngay
                 attack_gone = False
-                for _ in range(60):  # Timeout tối đa 30 giây
+                for _ in range(150):  # Timeout tối đa 15 giây (150 lần x 0.1s)
                     if not self.is_running:
                         return
                     screen = take_screenshot()
-                    attack_still_here = find_template(screen, "assets/buttons/attack.webp", confidence=0.85)
+                    attack_still_here = find_template(screen, "assets/buttons/attack.webp", confidence=0.85, region=self.attack_region)
                     if not attack_still_here:
                         print("[ACTION] Nút Attack đã biến mất! Reload ngay lập tức...")
                         attack_gone = True
@@ -601,10 +487,43 @@ class GBFController:
                                 self.reload_coords = rl
                                 print(f"[CACHE] Cache Reload coords: {self.reload_coords}")
                         break
-                    time.sleep(0.5)
+                    time.sleep(0.02)
 
                 if not attack_gone:
                     print("[WARNING] Timeout chờ attack biến mất. Tiến hành reload anyway...")
+
+                # Reload bằng tọa độ cache hoặc fallback
+                if self.reload_coords:
+                    print(f"[ACTION] Tap reload tại cache {self.reload_coords}...")
+                    tap(self.reload_coords[0], self.reload_coords[1])
+                else:
+                    reload_page()
+                time.sleep(1.5)
+
+            elif self.mode == "full_auto_quick":
+                # Chế độ Full Auto + Instant Reload (không chờ attack biến mất)
+                print("[MODE] Đang chạy chế độ FULL AUTO + INSTANT RELOAD...")
+
+                # Đảm bảo có cache Full Auto và Reload
+                if not self.full_auto_coords or not self.reload_coords:
+                    print("[CACHE] Scan vị trí Full Auto và Reload để cache...")
+                    if not self.full_auto_coords:
+                        fa = find_template(screen, "assets/buttons/full_auto.webp", confidence=0.85)
+                        if fa:
+                            self.full_auto_coords = fa
+                            print(f"[CACHE] Đã cache Full Auto coords: {self.full_auto_coords}")
+                    if not self.reload_coords:
+                        rl = find_template(screen, "assets/buttons/reload.webp", confidence=0.85)
+                        if rl:
+                            self.reload_coords = rl
+                            print(f"[CACHE] Đã cache Reload coords: {self.reload_coords}")
+
+                # Kích hoạt Full Auto
+                if self.full_auto_coords:
+                    tap(self.full_auto_coords[0], self.full_auto_coords[1])
+                else:
+                    tap(int(w * 0.15), int(h * 0.45))
+                time.sleep(0.5)
 
                 # Reload bằng tọa độ cache hoặc fallback
                 if self.reload_coords:
@@ -618,15 +537,15 @@ class GBFController:
             print("[PROCESS] Đang chờ và nhận diện trạng thái sau reload...")
             state_detected = None
             
-            # Lặp kiểm tra trong khoảng tối đa 15 giây (30 lần quét x 0.5 giây)
-            for scan_i in range(30):
+            # Lặp kiểm tra trong khoảng tối đa 15 giây (150 lần quét x 0.1 giây)
+            for scan_i in range(150):
                 if not self.is_running:
                     return
 
                 screen = take_screenshot()
 
-                # Quét Captcha mỗi 10 lần quét (giảm tần suất để tránh lag OCR)
-                if scan_i > 0 and scan_i % 10 == 0:
+                # Quét Captcha mỗi 15 lần quét (~1.5 giây một lần)
+                if scan_i > 0 and scan_i % 15 == 0:
                     if self.check_captcha(screen):
                         print("[ALERT] PHÁT HIỆN CAPTCHA 'Access Verification'!")
                         self.send_discord_webhook("@everyone Phát hiện Captcha 'Access Verification'! Bot đã tự động dừng.")
@@ -640,13 +559,13 @@ class GBFController:
                     break
 
                 # 2. Kiểm tra xem nút Attack có quay lại không (quay lại combat do boss chưa chết)
-                current_attack = find_template(screen, "assets/buttons/attack.webp", confidence=0.85)
+                current_attack = find_template(screen, "assets/buttons/attack.webp", confidence=0.85, region=self.attack_region)
                 if current_attack:
                     print("[INFO] Boss chưa chết! Phát hiện lại nút Attack. Tiếp tục lượt combat tiếp theo...")
                     state_detected = "combat"
                     break
 
-                time.sleep(0.5)
+                time.sleep(0.02)
 
             if state_detected == "ended":
                 break
@@ -668,7 +587,10 @@ class GBFController:
             print(f"[WARNING] Đạt giới hạn tối đa {max_turns} lượt combat. Kết thúc combat.")
 
     def check_is_battle_ended(self, screen=None):
-        """Kiểm tra màn hình kết quả thông qua OCR (tìm chữ EXP, Loot...).
+        """
+        Kiểm tra màn hình kết quả bằng Template Matching (thay OCR).
+        Tìm các header: EXP Gained, Loot Collected, Battle Concluded.
+        Nhanh hơn ~50x so với OCR (~20ms thay vì ~800ms).
 
         Args:
             screen: PIL Image đã có sẵn để dùng lại, tránh chụp thêm nếu caller đã có.
@@ -677,14 +599,21 @@ class GBFController:
         if screen is None:
             screen = take_screenshot()
         w, h = screen.size
-        # Vùng đọc chữ kết quả (ví dụ: EXP Gained, Loot, Results ở giữa màn hình)
-        result_region = (0, int(h * 0.2), w, int(h * 0.5))
-        text = get_text_from_region(screen, result_region, threshold_val=180)
+        # Vùng kết quả thường hiển thị ở phần trên-giữa màn hình
+        result_region = (0, int(h * 0.1), w, int(h * 0.5))
 
-        keywords = ["EXP", "Loot", "Gained", "Result", "Concluded", "Tap"]
-        for keyword in keywords:
-            if keyword.lower() in text.lower():
-                print(f"[OCR DETECTED] Trận đấu kết thúc! Nhận diện được chữ: '{keyword}'")
+        # Kiểm tra các template header kết quả trận đấu
+        end_templates = [
+            "assets/headers/exp_gained_header.webp",
+            "assets/headers/loot_collected_header.webp",
+            "assets/headers/battle_concluded_header.webp",
+        ]
+        for tpl in end_templates:
+            result = find_template(screen, tpl, confidence=0.80,
+                                  region=result_region, grayscale=True)
+            if result:
+                tpl_name = os.path.basename(tpl)
+                print(f"[DETECT] Trận đấu kết thúc! Nhận diện header: {tpl_name}")
                 return True
         return False
 
@@ -696,9 +625,9 @@ class GBFController:
                 break
             if self.check_is_battle_ended():
                 break
-            time.sleep(0.5)  # 0.5s/lần scan
+            time.sleep(0.1)  # 0.1s/lần scan
 
-    def return_to_summon_selection(self):
+    def return_to_party_selection(self):
         """Bước 4: Nhấn nút quay lại màn hình chọn Summon sau khi kết thúc trận."""
         if not self.is_running:
             return
@@ -715,7 +644,7 @@ class GBFController:
             bottom_right_region = (int(w * 0.5), int(h * 0.5), w, h)
             found_rocket = False
 
-            for _ in range(24):  # Đợi tối đa ~12 giây (24 lần x 0.5s)
+            for _ in range(120):  # Đợi tối đa ~12 giây (120 lần x 0.1s)
                 if not self.is_running:
                     return
                 screen = take_screenshot()
@@ -726,7 +655,7 @@ class GBFController:
                     tap(back_btn[0], back_btn[1])
                     found_rocket = True
                     break
-                time.sleep(0.5)
+                time.sleep(0.1)
 
             if not self.is_running:
                 return
@@ -753,16 +682,32 @@ class GBFController:
 
         # Thay sleep cứng bằng poll loop: chờ nút OK xuất hiện = màn Party đã load xong
         print("[PROCESS] Đang chờ màn hình Party load (quét nút OK)...")
-        for _ in range(40):  # Timeout tối đa ~20 giây (40 lần x 0.5s)
+        for _ in range(200):  # Timeout tối đa ~20 giây (200 lần x 0.1s)
             if not self.is_running:
                 return
             screen = take_screenshot()
-            ok = find_template(screen, "assets/buttons/ok.webp", confidence=0.85)
+            w, h = screen.size
+            if self.ok_coords:
+                # Quét trong vùng nhỏ xung quanh ok_coords để kiểm tra nhanh xem nút OK đã xuất hiện chưa
+                # Vùng quét phải lớn hơn kích thước template ok.webp (433x109)
+                ok_region = (
+                    max(0, self.ok_coords[0] - 250),
+                    max(0, self.ok_coords[1] - 80),
+                    min(w, self.ok_coords[0] + 250),
+                    min(h, self.ok_coords[1] + 80)
+                )
+                ok = find_template(screen, "assets/buttons/ok.webp", confidence=0.85, region=ok_region)
+            else:
+                ok = find_template(screen, "assets/buttons/ok.webp", confidence=0.85)
+
             if ok:
-                self.ok_coords = ok  # Cache luôn để start_loop dùng ngay
-                print(f"[SUCCESS] Màn Party đã load! Cache OK coords: {self.ok_coords}")
+                if not self.ok_coords:
+                    self.ok_coords = ok  # Chỉ cache tọa độ OK ở lần đầu tiên phát hiện
+                    print(f"[SUCCESS] Màn Party đã load! Đã cache tọa độ OK: {self.ok_coords}")
+                else:
+                    print(f"[SUCCESS] Màn Party đã load (Xác nhận qua cache OK coords)!")
                 return
-            time.sleep(0.5)
+            time.sleep(0.1)
 
         print("[WARNING] Timeout chờ màn Party. start_loop sẽ tự xử lý ở vòng tiếp.")
 
@@ -786,38 +731,39 @@ class GBFController:
                 screen_type = self.detect_start_screen()
             else:
                 screen_type = "party"  # Sau khi tap rocket, game luôn quay về màn Party
-                print("[FAST] Vòng tiếp theo — bỏ qua detect/OCR, xác định là màn Party ngay.")
+                print("[FAST] Vòng tiếp theo — bỏ qua detect, xác định là màn Party ngay.")
             
             if screen_type == "unknown":
-                print("[ERROR] Bạn không ở màn hình Chọn Summon hoặc Chọn Party! Dừng bot.")
+                print("[ERROR] Bạn không ở màn hình Chọn Party! Dừng bot.")
                 break
                 
-            if screen_type == "summon":
-                print("[SUCCESS] Xác nhận đang ở màn hình Chọn Summon. Tiến hành chọn Summon...")
-                # Bước 2: Chọn Summon và nhấn OK bắt đầu phó bản
-                self.select_summon_and_start()
-            elif screen_type == "party":
+            if screen_type == "party":
                 if current_loop == 0:
                     print("[SUCCESS] Xác nhận đã ở màn Chọn Party. Tiến hành click OK...")
-                screen = take_screenshot()
-                w, h = screen.size
-                # Dùng cache nếu có, chỉ scan lần đầu
-                if not self.ok_coords:
+                
+                # Nếu đã có tọa độ OK cache, tap thẳng lập tức không cần chụp màn hình/matching lại
+                if self.ok_coords:
+                    print(f"[CACHE] Tap OK tại tọa độ cache {self.ok_coords}...")
+                    tap(self.ok_coords[0], self.ok_coords[1])
+                else:
+                    screen = take_screenshot()
+                    w, h = screen.size
                     ok = find_template(screen, "assets/buttons/ok.webp", confidence=0.85)
                     if ok:
                         self.ok_coords = ok
                         print(f"[CACHE] Đã cache OK coords: {self.ok_coords}")
-                if self.ok_coords:
-                    print(f"[CACHE] Tap OK tại {self.ok_coords}...")
-                    tap(self.ok_coords[0], self.ok_coords[1])
-                else:
-                    print("[WARNING] Không thấy nút OK, nhấp tọa độ mặc định.")
-                    tap(w // 2, int(h * 0.83))
+                        print(f"[CACHE] Tap OK tại tọa độ cache {self.ok_coords}...")
+                        tap(self.ok_coords[0], self.ok_coords[1])
+                    else:
+                        print("[WARNING] Không thấy nút OK, nhấp tọa độ mặc định.")
+                        tap(w // 2, int(h * 0.83))
                 # Không cần sleep cứng — wait_for_combat_start sẽ poll đến khi thấy Attack
             
             if not self.is_running:
                 break
                 
+            time.sleep(4.0)
+
             # Đợi vào trận và lấy tọa độ nút Attack + screen hiện tại
             attack_coords, combat_screen = self.wait_for_combat_start()
             
@@ -831,7 +777,7 @@ class GBFController:
                 break
                 
             # Bước 4: Nhấn nút quay trở lại màn chọn Summon
-            self.return_to_summon_selection()
+            self.return_to_party_selection()
             
             print(f"===== HOÀN THÀNH VÒNG LẶP THỨ {current_loop + 1} =====\n")
             current_loop += 1

@@ -1,6 +1,6 @@
 # GBF ADB Bot (Python)
 
-Bot tự động chơi **Granblue Fantasy** trên thiết bị Android thật hoặc giả lập thông qua **ADB (Android Debug Bridge)**, sử dụng **OpenCV** để nhận diện ảnh và **Tesseract OCR** để đọc text trên màn hình.
+Bot tự động chơi **Granblue Fantasy** trên thiết bị Android thật hoặc giả lập thông qua **ADB (Android Debug Bridge)**, sử dụng **OpenCV Template Matching** được tối ưu hóa hiệu năng cực cao (hỗ trợ quét phân vùng nhỏ/sub-region và cache tọa độ thông minh giúp tăng tốc ~50-100x so với OCR truyền thống).
 
 > ⚠️ **Disclaimer:** Sử dụng bot trong game có thể vi phạm điều khoản dịch vụ của KMR. Tác giả không chịu trách nhiệm về bất kỳ hậu quả nào từ việc sử dụng tool này.
 
@@ -29,9 +29,7 @@ gbf-adb-bot/
 
 - **Python 3.8+**
 - **ADB (Android Debug Bridge)** đã được cài đặt và có trong PATH, hoặc sử dụng ADB từ giả lập (LDPlayer, MuMu, v.v.)
-- **Tesseract OCR** (chỉ cần cho OCR text):
-  - Windows: [Tải tại đây](https://github.com/UB-Mannheim/tesseract/wiki)
-  - Cài vào `C:\Program Files\Tesseract-OCR\`
+- Đã cài đặt các thư viện trong `requirements.txt` (sử dụng `adbutils` và `opencv-python` để đạt tốc độ xử lý nhanh nhất)
 
 ---
 
@@ -122,10 +120,6 @@ bot.start_loop(loop_count=5)           # -1 = vô hạn
 **Ảnh template không khớp (confidence thấp):**
 - Chạy `scan_templates.py` để chụp lại ảnh template từ thiết bị của bạn
 - Ảnh template phụ thuộc vào độ phân giải màn hình thiết bị
-
-**Tesseract không tìm thấy:**
-- Cài Tesseract theo link ở trên
-- Hoặc thêm đường dẫn thủ công trong `gbf_bot_prototype.py`
 
 ---
 
