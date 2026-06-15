@@ -41,3 +41,6 @@ assets/items/*_backup_*.webp
 
 # Logs
 *.log
+
+# Local configs
+config.txt

@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QFont, QIcon
 
 # Import logic bot nguyên mẫu
-from gbf_bot_prototype import GBFController, DEVICE_ADDRESS, get_adb_path
+from gbf_bot_prototype import GBFController, DEVICE_ADDRESS, get_adb_path, connect_device
 
 # Palette màu tối giao diện hiện đại (lấy cảm hứng từ UMAT và MAA)
 COLORS = {
@@ -119,7 +119,7 @@ class BotWorker(QThread):
     def run(self):
         # Thiết lập biến toàn cục cho luồng hoạt động
         import gbf_bot_prototype
-        gbf_bot_prototype.DEVICE_ADDRESS = self.device_address
+        import builtins
         
         # Ghi đè hàm print trong luồng bot để xuất log ra giao diện GUI
         def custom_print(*args, **kwargs):
@@ -129,6 +129,9 @@ class BotWorker(QThread):
         gbf_bot_prototype.print = custom_print
         
         try:
+            # Kết nối thiết bị qua adbutils (tạo device object cho screenshot/tap nhanh)
+            connect_device(self.device_address)
+            
             self.bot = GBFController(mode=self.mode, discord_webhook_url=self.discord_webhook_url)
             # Khởi chạy luồng tuần tự
             custom_print(f"[BOT] Bắt đầu khởi tạo ADB tới: {self.device_address or 'Mặc định'}")
@@ -139,6 +142,8 @@ class BotWorker(QThread):
         except Exception as e:
             custom_print(f"[ERROR] Phát hiện ngoại lệ khi chạy Bot: {e}")
         finally:
+            # Khôi phục lại hàm print mặc định để tránh giữ reference tới worker đã dừng/bị xóa
+            gbf_bot_prototype.print = builtins.print
             self.finished_signal.emit()
 
     def stop(self):
@@ -200,7 +205,11 @@ class GBFAutomationGUI(QMainWindow):
         # Chế độ chạy
         left_layout.addWidget(QLabel("Chế độ chiến đấu (Farming Mode):"))
         self.cb_mode = QComboBox()
-        self.cb_mode.addItems(["Full Auto + Reload (full_auto)", "Auto Spam Attack (auto)"])
+        self.cb_mode.addItems([
+            "Full Auto + Reload (full_auto)",
+            "Full Auto + Instant Reload (full_auto_quick)",
+            "Auto Spam Attack (auto)"
+        ])
         left_layout.addWidget(self.cb_mode)
         
         # Cấu hình số vòng lặp
@@ -413,7 +422,12 @@ class GBFAutomationGUI(QMainWindow):
             
             # Khởi chạy luồng bot mới
             mode_text = self.cb_mode.currentText()
-            mode = "full_auto" if "Full Auto" in mode_text else "auto"
+            if "Instant" in mode_text or "quick" in mode_text:
+                mode = "full_auto_quick"
+            elif "Full Auto" in mode_text:
+                mode = "full_auto"
+            else:
+                mode = "auto"
             device_address = self.txt_adb.text().strip()
             
             self.add_log(f"Khởi động bot (Chế độ: {mode.upper()}, Số vòng: {'Vô hạn' if loop_count == -1 else loop_count})...")
