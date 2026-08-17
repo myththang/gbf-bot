@@ -22,6 +22,7 @@ BUTTON_TEMPLATES = [
     "assets/buttons/attack.webp",
     "assets/buttons/full_auto.webp",
     "assets/buttons/ok.webp",
+    "assets/buttons/button_a.webp",
     "assets/buttons/reload.webp",
     "assets/buttons/rocket.webp",
     "assets/buttons/party_set_1.webp",
