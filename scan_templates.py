@@ -80,6 +80,11 @@ BUTTON_TEMPLATES = [
         "hint": "Tìm NÚT OK (nút xác nhận trong hộp thoại)",
     },
     {
+        "name": "Button A (Optional reload trigger)",
+        "path": "assets/buttons/button_a.webp",
+        "hint": "Tìm NÚT A hoặc bất kỳ nút nào xuất hiện để kích hoạt reload ngay lập tức",
+    },
+    {
         "name": "Reload Button",
         "path": "assets/buttons/reload.webp",
         "hint": "Tìm BIỂU TƯỢNG TẢI LẠI TRANG (nút reload trên thanh trình duyệt)",

@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QFont, QIcon
 
 # Import logic bot nguyên mẫu
-from gbf_bot_prototype import GBFController, DEVICE_ADDRESS, get_adb_path, connect_device
+from gbf_bot_prototype import GBFController, DEVICE_ADDRESS, get_adb_path, connect_device, start_screenshot_worker, stop_screenshot_worker
 
 # Palette màu tối giao diện hiện đại (lấy cảm hứng từ UMAT và MAA)
 COLORS = {
@@ -102,6 +102,62 @@ QTextEdit {{
 }}
 """
 
+# ==================== THREAD DÒ TÌM ADB ====================
+class ADBDetectWorker(QThread):
+    detected_signal = Signal(str)
+    log_signal = Signal(str)
+    
+    def run(self):
+        self.log_signal.emit("Bắt đầu quét tìm giả lập Android đang chạy...")
+        common_ports = [5555, 5557, 5559, 7555, 16384, 16416, 62001, 62025, 21503]
+        import subprocess
+        from gbf_bot_prototype import get_adb_path
+        
+        found_device = None
+        adb_path = get_adb_path()
+        
+        # 1. Quét thử các thiết bị đã kết nối sẵn
+        try:
+            res = subprocess.run([adb_path, "devices"], capture_output=True, text=True, timeout=2, shell=True)
+            lines = res.stdout.strip().split("\n")
+            for line in lines[1:]:
+                if "\t" in line:
+                    parts = line.split("\t")
+                    if parts[1].strip() == "device":
+                        found_device = parts[0]
+                        self.log_signal.emit(f"Phát hiện thiết bị online sẵn: {found_device}")
+                        break
+        except Exception:
+            pass
+            
+        # 2. Nếu chưa có, thử kết nối tới các cổng phổ biến
+        if not found_device:
+            for port in common_ports:
+                addr = f"127.0.0.1:{port}"
+                try:
+                    subprocess.run([adb_path, "connect", addr], capture_output=True, text=True, timeout=0.8, shell=True)
+                except Exception:
+                    continue
+            
+            # Kiểm tra lại danh sách thiết bị sau khi thử connect
+            try:
+                res = subprocess.run([adb_path, "devices"], capture_output=True, text=True, timeout=2, shell=True)
+                lines = res.stdout.strip().split("\n")
+                for line in lines[1:]:
+                    if "\t" in line:
+                        parts = line.split("\t")
+                        if parts[1].strip() == "device":
+                            found_device = parts[0]
+                            self.log_signal.emit(f"Kết nối tự động thành công tới: {found_device}")
+                            break
+            except Exception as e:
+                self.log_signal.emit(f"[ERROR] Lỗi quét danh sách ADB: {e}")
+                
+        if found_device:
+            self.detected_signal.emit(found_device)
+        else:
+            self.log_signal.emit("Không phát hiện giả lập Android nào. Vui lòng mở giả lập của bạn trước!")
+
 # ==================== THREAD LUỒNG CHẠY BOT ====================
 class BotWorker(QThread):
     # Định nghĩa các tín hiệu giao tiếp giữa luồng chạy và giao diện
@@ -132,6 +188,9 @@ class BotWorker(QThread):
             # Kết nối thiết bị qua adbutils (tạo device object cho screenshot/tap nhanh)
             connect_device(self.device_address)
             
+            # [INIT] Khởi động screenshot worker background thread sau khi kết nối thiết bị
+            start_screenshot_worker()
+            
             self.bot = GBFController(mode=self.mode, discord_webhook_url=self.discord_webhook_url)
             # Khởi chạy luồng tuần tự
             custom_print(f"[BOT] Bắt đầu khởi tạo ADB tới: {self.device_address or 'Mặc định'}")
@@ -142,6 +201,8 @@ class BotWorker(QThread):
         except Exception as e:
             custom_print(f"[ERROR] Phát hiện ngoại lệ khi chạy Bot: {e}")
         finally:
+            # [INIT] Dừng screenshot worker sạch sẽ khi bot kết thúc hoặc lỗi
+            stop_screenshot_worker()
             # Khôi phục lại hàm print mặc định để tránh giữ reference tới worker đã dừng/bị xóa
             gbf_bot_prototype.print = builtins.print
             self.finished_signal.emit()
@@ -159,6 +220,18 @@ class GBFAutomationGUI(QMainWindow):
         self.setStyleSheet(MAIN_STYLESHEET)
         
         self.worker = None
+        self.adb_worker = None
+        
+        # Thiet lap Icon cho ung dung (ho tro ca dev/python va frozen/exe)
+        if getattr(sys, 'frozen', False):
+            base_path = os.path.dirname(sys.executable)
+        else:
+            base_path = os.path.dirname(os.path.abspath(__file__))
+            
+        icon_path = os.path.join(base_path, "logo.png")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+            
         self._create_ui()
         self.add_log("Giao diện điều khiển khởi tạo thành công!")
         # Tự động quét và kết nối giả lập khi mở ứng dụng giống UMAT
@@ -291,56 +364,26 @@ class GBFAutomationGUI(QMainWindow):
         self.txt_log.append(f"{timestamp} {text}")
         
     def auto_detect_and_connect_adb(self):
-        """Tự động quét các cổng giả lập phổ biến và kết nối ADB giống UMAT."""
-        self.add_log("Bắt đầu quét tìm giả lập Android đang chạy...")
-        common_ports = [5555, 5557, 5559, 7555, 16384, 16416, 62001, 62025, 21503]
-        import subprocess
-        
-        found_device = None
-        
-        # 1. Quét thử các thiết bị đã kết nối sẵn
-        adb_path = get_adb_path()
-        try:
-            res = subprocess.run([adb_path, "devices"], capture_output=True, text=True, timeout=2, shell=True)
-            lines = res.stdout.strip().split("\n")
-            for line in lines[1:]:
-                if "\t" in line:
-                    parts = line.split("\t")
-                    if parts[1].strip() == "device":
-                        found_device = parts[0]
-                        self.add_log(f"Phát hiện thiết bị online sẵn: {found_device}")
-                        break
-        except Exception:
-            pass
+        """Tự động quét các cổng giả lập phổ biến và kết nối ADB ngầm (không treo giao diện)."""
+        if hasattr(self, 'adb_worker') and self.adb_worker and self.adb_worker.isRunning():
+            return
             
-        # 2. Nếu chưa có, thử kết nối tới các cổng phổ biến
-        if not found_device:
-            for port in common_ports:
-                addr = f"127.0.0.1:{port}"
-                try:
-                    subprocess.run([adb_path, "connect", addr], capture_output=True, text=True, timeout=0.8, shell=True)
-                except Exception:
-                    continue
+        self.btn_auto_adb.setEnabled(False)
+        self.adb_worker = ADBDetectWorker()
+        self.adb_worker.log_signal.connect(self.add_log)
+        
+        def on_detected(device):
+            self.txt_adb.setText(device)
+            self.add_log(f"Đã cấu hình thiết bị hoạt động: {device}")
             
-            # Kiểm tra lại danh sách thiết bị sau khi thử connect
-            try:
-                res = subprocess.run([adb_path, "devices"], capture_output=True, text=True, timeout=2, shell=True)
-                lines = res.stdout.strip().split("\n")
-                for line in lines[1:]:
-                    if "\t" in line:
-                        parts = line.split("\t")
-                        if parts[1].strip() == "device":
-                            found_device = parts[0]
-                            self.add_log(f"Kết nối tự động thành công tới: {found_device}")
-                            break
-            except Exception as e:
-                self.add_log(f"[ERROR] Lỗi quét danh sách ADB: {e}")
-                
-        if found_device:
-            self.txt_adb.setText(found_device)
-            self.add_log(f"Đã tự động cấu hình thiết bị hoạt động: {found_device}")
-        else:
-            self.add_log("Không phát hiện giả lập Android nào. Vui lòng mở giả lập của bạn trước!")
+        def on_finished():
+            self.btn_auto_adb.setEnabled(True)
+            self.adb_worker.deleteLater()
+            self.adb_worker = None
+            
+        self.adb_worker.detected_signal.connect(on_detected)
+        self.adb_worker.finished.connect(on_finished)
+        self.adb_worker.start()
 
     def check_adb_connection(self):
         """Thực thi kết nối và kiểm tra thiết bị qua ADB."""
@@ -480,7 +523,8 @@ class GBFAutomationGUI(QMainWindow):
             self.worker = None
 
     def closeEvent(self, event):
-        """Xử lý tắt ứng dụng an toàn."""
+        """Xử lý tắt ứng dụng an toàn và dọn dẹp tiến trình ADB."""
+        should_close = False
         if self.worker and self.worker.isRunning():
             reply = QMessageBox.question(
                 self, "Xác nhận thoát", "Bot đang hoạt động. Bạn có chắc chắn muốn dừng bot và thoát không?",
@@ -489,13 +533,32 @@ class GBFAutomationGUI(QMainWindow):
             if reply == QMessageBox.Yes:
                 self.worker.terminate()
                 self.worker.wait()
-                event.accept()
+                should_close = True
             else:
                 event.ignore()
         else:
+            should_close = True
+            
+        if should_close:
+            # Tu dong dung ADB server de giai phong file lock giup de dang xoa/build lai
+            try:
+                import subprocess
+                from gbf_bot_prototype import get_adb_path
+                adb_path = get_adb_path()
+                subprocess.run([adb_path, "kill-server"], capture_output=True, text=True, timeout=2, shell=True)
+            except Exception:
+                pass
             event.accept()
 
 if __name__ == "__main__":
+    # Thiet lap AppUserModelID de Windows hien thi dung Taskbar Icon cho PySide6
+    try:
+        import ctypes
+        myappid = 'gbfbot.automation.gui.v1'
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+    except Exception:
+        pass
+
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     gui = GBFAutomationGUI()
